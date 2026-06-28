@@ -32,6 +32,7 @@ unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY
 
 # Start our owned adapter for the chosen model; kill any prior instance on the port.
 export FUTURECAST_MODEL="$MODEL"
+export FUTURECAST_REASONING_EFFORT="${FUTURECAST_REASONING_EFFORT:-high}"  # adapter reads at boot
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
 "$ROOT/.venv/bin/python" "$HERE/llm_adapter.py" >"$ROOT/log/adapter.stdout.log" 2>&1 &
 ADAPTER_PID=$!

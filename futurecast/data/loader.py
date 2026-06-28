@@ -19,6 +19,14 @@ from typing import Optional
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
+# Cues that a free-form question wants a NUMBER (a quantity/series value), vs. an event/entity.
+# Source-agnostic (no site/series names) — just the vocabulary of quantities and units.
+_NUMERIC_CUES = re.compile(
+    r"\b(price|value|level|index|rate|ratio|yield|share of|capitali[sz]ation|market cap|"
+    r"amount|total|number of|how many|how much|percentage|usd|dollar|yuan|rmb|cny|"
+    r"kg|kilogram|tonne|ton|barrel|bushel|decimal places)\b"
+    r"|总市值|市值|价格|指数|百分|元|公斤|吨", re.I)
+
 
 @dataclass
 class Question:
@@ -31,15 +39,24 @@ class Question:
 
 
 def _infer_type(q: str) -> str:
+    """Classify the answer space so the runner can pick the numeric (A) vs event (B) playbook.
+
+    The benchmark's answer contract is the strongest signal: a Yes/No box or enumerated A./B.
+    options are clearly events; an explicit `\\boxed{number}` is numeric. The hard case is the
+    generic `\\boxed{YOUR_PREDICTION}` free-form contract, which covers BOTH numeric quantities
+    (a price, a market cap) and open events/entities (who wins, which names) — there we fall back
+    to numeric-vocabulary cues. Everything non-numeric routes to the event playbook (no third
+    playbook: B already spans market/odds/base-rate priors and latest-known-state priors).
+    """
+    if re.search(r"\\boxed\{\s*(yes|no)\s*\}", q, re.I):
+        return "binary event"
+    opts = re.findall(r"^[A-Z]\.\s", q, re.MULTILINE)
+    if len(opts) >= 2:
+        return "multiple choice"
     if "numeric prediction" in q or "\\boxed{number}" in q:
         return "number"
-    # choice questions enumerate "A. ... B. ..."; binary if exactly A/B
-    opts = re.findall(r"^[A-Z]\.\s", q, re.MULTILINE)
-    if len(opts) == 2:
-        return "binary choice"
-    if len(opts) > 2:
-        return "simple multiple choice"
-    return "number"
+    # generic free-form contract: decide by whether a quantity is being asked for.
+    return "number" if _NUMERIC_CUES.search(q) else "open event"
 
 
 def load_questions(path: str | Path, as_of_offset_days: int = 1) -> list[Question]:

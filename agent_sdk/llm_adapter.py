@@ -233,7 +233,13 @@ async def messages(request: Request):
     tools = _anthropic_tools_to_openai(body.get("tools"))
     want_stream = bool(body.get("stream"))
     oai_messages = _anthropic_messages_to_openai(system, msgs)
+    raw_tools = body.get("tools") or []
+    tool_names = [t.get("name") for t in raw_tools if isinstance(t, dict) and t.get("name")]
     _log(f"[req] msgs={len(msgs)} tools={len(tools) if tools else 0} stream={want_stream}")
+    # Log the exact tool surface once per run (first turn) so we can audit that only the
+    # representative official-loop tools + our MCP equivalents are exposed (no stray skills).
+    if len(msgs) <= 1:
+        _log(f"[tool-surface] {sorted(tool_names)}")
 
     try:
         resp = await _CLIENT.chat(oai_messages, tools=tools)

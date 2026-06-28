@@ -29,7 +29,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from futurecast.guard.as_of import check_as_of  # noqa: E402  generic as-of policy (core)
+from futurecast.guard.as_of import check_as_of, screen_and_redact  # noqa: E402  generic as-of policy (core)
 
 SERPER_URL = "https://google.serper.dev/search"
 JINA_READER = (os.environ.get("JINA_BASE_URL") or "https://r.jina.ai").rstrip("/")
@@ -301,6 +301,48 @@ async def _extract_relevant(content: str, instruction: str, cutoff: Optional[str
         return None
 
 
+# --------------------------------------------------------------------------------------
+# as-of screening model (the dedicated filter on every tool output — see guard.as_of)
+# --------------------------------------------------------------------------------------
+# A small model independent of the main agent inspects every search result / fetched page and
+# flags spans that leak post-cutoff or target-date values; guard.screen_and_redact then excises
+# them deterministically. This is the one trust we never hand to the main agent's prompt: it never
+# sees post-cutoff information because this model removed it at the tool boundary (AGENTS.md #5).
+_SCREENER = {"client": None, "tried": False}
+
+
+def _get_screener():
+    """Lazily build the dedicated as-of screening client (qwen3-next-80b via apihy)."""
+    if _SCREENER["tried"]:
+        return _SCREENER["client"]
+    _SCREENER["tried"] = True
+    if not os.environ.get("apihy_API_KEY_qwen"):
+        return None
+    try:
+        from futurecast.llm import OpenRouterNewAPIClient  # lazy: avoid MCP-startup cost
+        _SCREENER["client"] = OpenRouterNewAPIClient(
+            model="qwen3-next-80b-a3b-instruct", api_key_env="apihy_API_KEY_qwen",
+            base_url_env="apihy_BASE_URL", async_mode=True, max_tokens=2000)
+    except Exception:
+        _SCREENER["client"] = None
+    return _SCREENER["client"]
+
+
+async def _apply_screen(content: str) -> tuple[str, int]:
+    """Pass `content` through the dedicated as-of screening model before it reaches the agent.
+
+    Returns (possibly-redacted content, n_spans_removed). No-op when the run is unguarded or the
+    screener is unavailable — the deterministic regex guard already ran and remains the floor.
+    """
+    cutoff, target = _cutoff(), _target()
+    if not (cutoff or target):
+        return content, 0
+    client = _get_screener()
+    if client is None:
+        return content, 0
+    return await screen_and_redact(content, cutoff, target, client.chat)
+
+
 
 # --------------------------------------------------------------------------------------
 # tools
@@ -355,9 +397,11 @@ async def web_search(args: dict) -> dict:
             redacted += 1
         tag = f" [{when}]" if when else ""
         lines.append(f"- {it.get('title','')}{tag}\n  {link}\n  {snippet}")
-    head = (f"[as-of {cutoff} | target {target} blocked: {dropped} post-cutoff result(s) dropped, "
-            f"{redacted} snippet(s) redacted]\n") if (cutoff or target) else ""
     body = "\n".join(lines) or "[no results]"
+    # Dedicated-model screening pass on top of the regex guard above (semantic leaks it misses).
+    body, screened = await _apply_screen(body)
+    head = (f"[as-of {cutoff} | target {target} blocked: {dropped} post-cutoff result(s) dropped, "
+            f"{redacted} snippet(s) redacted, {screened} span(s) screened]\n") if (cutoff or target) else ""
     return {"content": [{"type": "text", "text": head + body}]}
 
 
@@ -403,14 +447,19 @@ async def read_webpage(args: dict) -> dict:
 
     # No blind truncation. Small page -> return whole; large page -> extract relevant facts.
     if len(text) <= RETURN_BUDGET:
-        return {"content": [{"type": "text", "text": banner + text}]}
-    extracted = await _extract_relevant(text, instruction, cutoff)
-    if extracted:
-        body = (f"[large page reduced to instruction-relevant facts via extractor; "
-                f"original {len(text)} chars]\nInstruction: {instruction}\n\n{extracted}")
+        body = text
     else:
-        body = (f"[large page ({len(text)} chars) reduced by relevance windowing]\n\n"
-                + _relevance_window(text, instruction, RETURN_BUDGET))
+        extracted = await _extract_relevant(text, instruction, cutoff)
+        if extracted:
+            body = (f"[large page reduced to instruction-relevant facts via extractor; "
+                    f"original {len(text)} chars]\nInstruction: {instruction}\n\n{extracted}")
+        else:
+            body = (f"[large page ({len(text)} chars) reduced by relevance windowing]\n\n"
+                    + _relevance_window(text, instruction, RETURN_BUDGET))
+    # Dedicated-model screening pass on top of the regex line-strip above.
+    body, screened = await _apply_screen(body)
+    if banner and screened:
+        banner = banner.rstrip("\n") + f" + {screened} span(s) screened by as-of model.\n\n"
     return {"content": [{"type": "text", "text": banner + body}]}
 
 
@@ -441,8 +490,10 @@ async def exa_search(args: dict) -> dict:
             continue
         tag = f" [{when}]" if when else ""
         lines.append(f"- {it.get('title','')}{tag}\n  {it.get('url','')}")
-    head = f"[as-of {cutoff}: {dropped} post-cutoff result(s) dropped]\n" if cutoff else ""
-    return {"content": [{"type": "text", "text": head + ("\n".join(lines) or "[no results]")}]}
+    body, screened = await _apply_screen("\n".join(lines) or "[no results]")
+    head = (f"[as-of {cutoff}: {dropped} post-cutoff result(s) dropped, {screened} screened]\n"
+            if cutoff else "")
+    return {"content": [{"type": "text", "text": head + body}]}
 
 
 def create_server():
@@ -456,12 +507,31 @@ def create_server():
     return create_sdk_mcp_server(name="futurecast", version="0.2.0", tools=tools)
 
 
-# Tool names the runner should allow. Built-in WebSearch/WebFetch are disallowed (they don't
-# execute off-Claude); local Bash/Read/Edit/Write are kept enabled by the runner.
+# --- tool surface for a forecasting run ----------------------------------------------------
+# We want the agent to see a surface that REPRESENTS the official Claude Code agent loop
+# (read/search/edit/run + planning + subagents), not this host harness's idiosyncratic
+# orchestration tools. Two levers, applied by the runner:
+#   * ALLOWED    — auto-approved tools (permission allowlist).
+#   * DISALLOWED — tools removed from the surface entirely.
+# The web surface is our in-process MCP (Serper/Jina/Exa), since Anthropic's server-side
+# WebSearch/WebFetch don't execute when the turn is routed to a non-Claude gateway model.
 ALLOWED = [
     "mcp__futurecast__web_search",
     "mcp__futurecast__read_webpage",
     "mcp__futurecast__exa_search",
-    "Bash", "Read", "Edit", "Write",
+    "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit",
+    "Bash", "Agent", "Skill",
+    "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
 ]
-DISALLOWED_BUILTINS = ["WebSearch", "WebFetch"]
+
+# Tools removed from the exposed surface. WebSearch/WebFetch are Anthropic server-side tools that
+# don't run off-Claude (we use our MCP equivalents). The rest are this host harness's
+# orchestration/scheduling plumbing (cron, git worktrees, multi-agent messaging, design-sync,
+# background-task control) — irrelevant to a forecast and pure noise in the rollout.
+DISALLOWED_BUILTINS = [
+    "WebSearch", "WebFetch",
+    "CronCreate", "CronDelete", "CronList",
+    "DesignSync", "Workflow", "SendMessage", "ScheduleWakeup",
+    "EnterWorktree", "ExitWorktree",
+    "TaskOutput", "TaskStop",
+]

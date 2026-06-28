@@ -48,20 +48,61 @@ sys.path.insert(0, str(CWD))    # futurecast package
 
 from futurecast.data.loader import load_questions  # noqa: E402
 
-PLAYBOOK = (CWD / "futurecast/playbook/playbook_A_numeric.md").read_text(encoding="utf-8")
+PLAYBOOK_DIR = CWD / "futurecast/playbook"
 DEFAULT_QFILE = "tasks/sample_futureworld_0624_30.jsonl"
 _MODEL_SHORT = {"glm-5": "glm5", "glm-5.1": "glm51", "gpt-5.5": "gpt55", "gpt-5.4": "gpt54"}
 
-# The playbook tells the model HOW to forecast; the benchmark question carries the exact answer
-# contract. We do NOT append our own output format — that would conflict with the question's
-# "Do not use any other format" instruction.
-SYSTEM_PROMPT = PLAYBOOK + (
-    "\n\n## Tools & boundary\n"
-    "Use `web_search` / `read_webpage` / `exa_search` to find the most recent authoritative value "
-    "of THIS exact series at or before the as-of cutoff. Every fetch is as-of guarded: anything "
-    "dated after the cutoff is blocked or redacted, so do not try to read the realized value.\n"
-    "Follow the question's required answer format exactly."
-)
+
+def _is_numeric(forecast_type: str) -> bool:
+    """Numeric-series questions use playbook A; one-off events (choice) use playbook B."""
+    return forecast_type == "number"
+
+
+def build_system_prompt(q) -> str:
+    """Assemble the system prompt: the type-appropriate playbook + tool/boundary + vantage frame.
+
+    Playbook A (numeric series) and B (one-off events) encode different priors — a recent same-
+    series value vs. a market/odds/base-rate — so the boundary and vantage text must match the
+    type, otherwise an event question gets numeric-series instructions ('extrapolate the series').
+    """
+    as_of, target = q.as_of or "", q.target_date or ""
+    if _is_numeric(q.forecast_type):
+        playbook = (PLAYBOOK_DIR / "playbook_A_numeric.md").read_text(encoding="utf-8")
+        boundary = (
+            "Use `web_search` / `read_webpage` / `exa_search` to find the most recent authoritative "
+            "value of THIS exact series at or before the as-of cutoff. Every fetch is as-of guarded: "
+            "anything dated after the cutoff is blocked or redacted, so do not try to read the "
+            "realized value.\nFollow the question's required answer format exactly."
+        )
+        vantage = (
+            f"its realized value does not exist and cannot be looked up. You must FORECAST it from "
+            f"information available on or before {as_of}. If any source appears to state the value "
+            f"AT the target date, it is post-cutoff — ignore it (the fetch guard also blocks/redacts "
+            f"such data). Anchor on the latest value at/<= {as_of}, then extrapolate."
+        )
+    else:
+        playbook = (PLAYBOOK_DIR / "playbook_B_event.md").read_text(encoding="utf-8")
+        boundary = (
+            "Use `web_search` / `read_webpage` / `exa_search` to find the PRIOR for this event as of "
+            "the cutoff: the prediction-market price / bookmaker odds / polling average, or — if none "
+            "exists — a reference-class base rate. Every fetch is as-of guarded: anything dated after "
+            "the cutoff is blocked or redacted, so do not try to read the resolved outcome.\n"
+            "Follow the question's required answer format exactly."
+        )
+        vantage = (
+            f"the event has NOT resolved yet from your vantage point: the outcome does not exist and "
+            f"cannot be looked up. You must FORECAST it from information (markets/odds/polls/base "
+            f"rates) available on or before {as_of}. If any source appears to state the resolved "
+            f"outcome, it is post-cutoff — ignore it (the fetch guard also blocks/redacts such data). "
+            f"Anchor on the prior available at/<= {as_of}, then adjust with a few factors."
+        )
+    return (
+        playbook
+        + "\n\n## Tools & boundary\n" + boundary
+        + "\n\n## Vantage point (hard rule)\n"
+        + f"Treat **{as_of}** as the current date ('today'). The target **{target}** has NOT "
+        f"happened yet from your vantage point: " + vantage
+    )
 
 
 def _extract_boxed(text: str) -> str | None:
@@ -79,20 +120,12 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
     os.environ["FUTURECAST_AS_OF"] = as_of   # the as-of guard (tools_mcp) reads this
     os.environ["FUTURECAST_TARGET"] = q.target_date or ""  # the date whose value must NOT leak
 
-    # Per-question as-of framing. The benchmark's target dates can be in the *indexable past*
-    # relative to wall-clock, so a general agent will reason "this already happened, let me look
-    # up the realized value" and leak the answer (observed in trajectories). We reframe the
-    # vantage point: treat the cutoff as 'today', making the target genuinely future + unknowable.
-    as_of_frame = (
-        f"\n\n## Vantage point (hard rule)\n"
-        f"Treat **{as_of}** as the current date ('today'). The target date **{q.target_date}** has "
-        f"NOT happened yet from your vantage point: its realized value does not exist and cannot be "
-        f"looked up. You must FORECAST it from information available on or before {as_of}. If any "
-        f"source appears to state the value AT the target date, it is post-cutoff — ignore it (the "
-        f"fetch guard also blocks/redacts such data). Anchor on the latest value at/<= {as_of}, then "
-        f"extrapolate."
-    )
-    system_prompt = SYSTEM_PROMPT + as_of_frame
+    # Per-question system prompt: type-appropriate playbook (A numeric / B event) + tool boundary
+    # + a vantage-point reframe. The benchmark's target dates can be in the *indexable past*
+    # relative to wall-clock, so a general agent will reason "this already happened, let me look up
+    # the realized value" and leak the answer (observed in trajectories). We reframe the vantage:
+    # treat the cutoff as 'today', making the target genuinely future + unknowable.
+    system_prompt = build_system_prompt(q)
 
     env = dict(os.environ)
     env.update(
