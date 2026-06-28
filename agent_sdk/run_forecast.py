@@ -116,7 +116,7 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
         allowed_tools=allowed,
         disallowed_tools=disallowed,
         thinking={"type": "enabled", "budget_tokens": 4000},  # -> ccr -> upstream reasoning.effort
-        max_turns=10 if use_tools else 3,
+        max_turns=14 if use_tools else 3,
         cwd=str(CWD),
         env=env,
         setting_sources=[],

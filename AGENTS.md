@@ -28,21 +28,20 @@ make that failure mode structurally impossible here.
 ## Boundaries of ownership (what we control vs rent)
 
 - **Own** (small, ours, ~hundreds of lines): playbook, as-of guard, scorable output, experience
-  library, and the run harness (`agent_sdk/`: ccr config generation + tools + runner).
-- **Harvest** (generic, well-tested, copied in): `futurecast/llm/` (from core/llm — kept as the
-  reasoning-capable direct client; see below); scoring + question collection from `verl-tool-future`.
-- **Rent** (don't rebuild): the agent loop machinery (Claude Agent SDK) AND the model routing
-  (claude-code-router). A run picks its gateway model via `agent_sdk/gen_ccr_config.py`
-  (apihy glm/qwen, haoxiang gpt); the same agent + tool surface serves all of them. There is no
-  hand-written Python loop here — it was removed once ccr covered gpt too.
+  library, the run harness (`agent_sdk/`: the LLM adapter + tools + runner), and — deliberately —
+  the **model-routing layer** (`agent_sdk/llm_adapter.py`, backed by `futurecast/llm/`).
+- **Harvest** (generic, well-tested, copied in): `futurecast/llm/` (from core/llm — now the backend
+  of the adapter); scoring + question collection from `verl-tool-future`.
+- **Rent, unchanged** (don't rebuild): the agent **harness** — context management, planning, memory,
+  the agent loop (Claude Agent SDK / claude CLI). We do NOT touch it; a run picks its gateway model
+  via `--model` and the SAME agent + tool surface serves all models. (We replaced claude-code-router
+  with our own adapter — owning model routing is the point; the harness stays rented.)
 
-> Reasoning capture (verified, see `docs/analysis_phase2.md`): with the `reasoning` transformer on
-> each ccr provider + `thinking` enabled in the Agent SDK, the model's intermediate reasoning lands
-> in the rollout as Anthropic `thinking` blocks. Caveats: glm exposes `reasoning_content` reliably
-> (but ccr 2.0.0 + thinking duplicates glm tool-call args — a bug); haoxiang/gpt returns
-> `reasoning_content` only intermittently over chat/completions (the reliable gpt path is the
-> Responses API `summary:auto`, i.e. `futurecast/llm/`). A self-owned model-adapter is the proposed
-> fix for both.
+> Reasoning capture (verified, see `docs/analysis_phase2.md` + the demo runs): the adapter replays
+> each turn as Anthropic SSE incl. `thinking` blocks built from the client's `reasoning_summary`, so
+> the model's intermediate reasoning lands in the rollout. glm exposes reasoning reliably and its
+> tool-call args are now clean (the ccr duplication bug is gone); gpt/haoxiang exposes a reasoning
+> summary only intermittently (Responses API), captured when present.
 
 ## When adding code, ask
 - Does this put forecasting cognition in Python instead of the prompt? → stop (guardrail #1).

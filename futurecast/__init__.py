@@ -1,7 +1,8 @@
 """futurecast — the prediction CONTROL LAYER for a rented general agent.
 
-We do NOT rebuild the agent loop. The loop is rented (Claude Agent SDK + claude-code-router,
-driving cheap gateway models — see agent_sdk/). This package owns only the four
+We do NOT rebuild the agent loop. The loop/harness (context, plan, memory) is rented (Claude
+Agent SDK); only the model-routing layer is ours (agent_sdk/llm_adapter.py, an Anthropic endpoint
+backed by futurecast/llm — see agent_sdk/). This package owns only the four
 forecasting-specific pieces that a general agent lacks:
 
   playbook/    — forecasting cognition, in the prompt (no Python state machine)

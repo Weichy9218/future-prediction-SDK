@@ -35,8 +35,10 @@ SERPER_URL = "https://google.serper.dev/search"
 JINA_READER = (os.environ.get("JINA_BASE_URL") or "https://r.jina.ai").rstrip("/")
 EXA_URL = "https://api.exa.ai/search"
 
-# Per-fetch size cap fed to the model (chars). Jina pages can be huge; keep context bounded.
-READ_CHAR_CAP = 12000
+# Content budgets (chars). We do NOT blind-truncate (Claude-Code-style): small pages return
+# whole; large pages are reduced by relevance windowing, then an optional cheap-LLM extraction.
+RETURN_BUDGET = 30000        # return a page untouched up to this size
+EXTRACT_INPUT_CAP = 45000    # max chars fed to the extractor (window first if larger)
 
 
 # --------------------------------------------------------------------------------------
@@ -165,6 +167,142 @@ def _serper_tbs(cutoff: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------------------
+# content reduction (Claude-Code-style: never blind-truncate a fetched page)
+# --------------------------------------------------------------------------------------
+_NUMERIC_LINE = re.compile(r"\d")
+_DATEY = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{4}年|\d{1,2}月")
+
+
+def _relevance_window(text: str, instruction: str, budget: int) -> str:
+    """Deterministic fallback reducer: keep the lines most relevant to `instruction`.
+
+    Scores each line by (instruction-keyword overlap) + (has a number) + (has a date); keeps the
+    highest-scoring lines in original order up to `budget` chars. This preserves the numeric anchor
+    (recent value + date) that a forecast needs, instead of cutting the first N chars blindly.
+    """
+    kws = {w.lower() for w in re.findall(r"[\w一-鿿]{2,}", instruction or "")}
+    lines = text.splitlines()
+    scored = []
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        score = sum(1 for k in kws if k in low)
+        if _NUMERIC_LINE.search(ln):
+            score += 1
+        if _DATEY.search(ln):
+            score += 1
+        scored.append((score, i, ln))
+    # greedily take highest-score lines until budget, then restore document order
+    chosen: set = set()
+    total = 0
+    for score, i, ln in sorted(scored, key=lambda t: (-t[0], t[1])):
+        if score <= 0:
+            break
+        if total + len(ln) + 1 > budget:
+            continue
+        chosen.add(i)
+        total += len(ln) + 1
+    if not chosen:
+        return text[:budget]
+    return "\n".join(lines[i] for i in sorted(chosen))
+
+
+_EXTRACTOR = {"client": None, "tried": False}
+
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_TAG = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.S | re.I)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _html_to_text(html: str) -> str:
+    """Crude HTML->text (no bs4 in env): drop script/style, strip tags, unescape, collapse blanks."""
+    import html as _h
+    txt = _TAG.sub(" ", html)
+    txt = _TAGS.sub("\n", txt)
+    txt = _h.unescape(txt)
+    return re.sub(r"\n[ \t]*\n[ \t\n]*", "\n\n", txt).strip()
+
+
+async def _fetch_clean(url: str) -> tuple[str, str]:
+    """Fetch a URL as text. Primary: Jina reader (clean markdown). Fallback: direct GET + strip.
+
+    Returns (text, source). Raises RuntimeError with a concise message if both fail, so the model
+    gets a clear signal to move on rather than retrying the same dead URL.
+    """
+    jina_headers = {"X-Return-Format": "markdown"}
+    jkey = os.environ.get("JINA_API_KEY")
+    if jkey:
+        jina_headers["Authorization"] = f"Bearer {jkey}"
+    jina_err = None
+    try:
+        async with httpx.AsyncClient(timeout=30, trust_env=False, follow_redirects=True) as c:
+            r = await c.get(f"{JINA_READER}/{url}", headers=jina_headers)
+            r.raise_for_status()
+            if r.text.strip():
+                return r.text, "jina"
+            jina_err = "empty"
+    except Exception as exc:
+        jina_err = f"{type(exc).__name__}"
+    # Fallback: fetch the page directly (works where Jina is blocked + the site allows bots).
+    try:
+        async with httpx.AsyncClient(timeout=20, trust_env=False, follow_redirects=True,
+                                     headers={"User-Agent": _UA}) as c:
+            r = await c.get(url)
+            r.raise_for_status()
+            text = _html_to_text(r.text)
+            if text:
+                return text, "direct"
+    except Exception as exc:
+        raise RuntimeError(f"jina={jina_err}; direct={type(exc).__name__}") from exc
+    raise RuntimeError(f"jina={jina_err}; direct=empty")
+
+
+def _get_extractor():
+    """Lazily build a cheap apihy client used only to extract relevant content from big pages."""
+    if _EXTRACTOR["tried"]:
+        return _EXTRACTOR["client"]
+    _EXTRACTOR["tried"] = True
+    if not os.environ.get("apihy_API_KEY_deepseek") and not os.environ.get("apihy_API_KEY_qwen"):
+        return None
+    try:
+        from futurecast.llm import OpenRouterNewAPIClient  # lazy: avoid MCP-startup cost
+        if os.environ.get("apihy_API_KEY_deepseek"):
+            c = OpenRouterNewAPIClient(model="deepseek-v4-flash", api_key_env="apihy_API_KEY_deepseek",
+                                       base_url_env="apihy_BASE_URL", async_mode=True, max_tokens=2000)
+        else:
+            c = OpenRouterNewAPIClient(model="qwen3-235b-a22b-instruct-2507",
+                                       api_key_env="apihy_API_KEY_qwen", base_url_env="apihy_BASE_URL",
+                                       async_mode=True, max_tokens=2000)
+        _EXTRACTOR["client"] = c
+    except Exception:
+        _EXTRACTOR["client"] = None
+    return _EXTRACTOR["client"]
+
+
+async def _extract_relevant(content: str, instruction: str, cutoff: Optional[str]) -> Optional[str]:
+    """Claude-Code-style extraction: a cheap model pulls the instruction-relevant facts from a big
+    page (recent values, dates, units, figures), preserving numbers verbatim. None on failure."""
+    client = _get_extractor()
+    if client is None:
+        return None
+    windowed = content if len(content) <= EXTRACT_INPUT_CAP else _relevance_window(
+        content, instruction, EXTRACT_INPUT_CAP)
+    asof_note = (f" Only use values dated on or before {cutoff}; ignore anything later." if cutoff else "")
+    prompt = (
+        f"From the web page below, extract ONLY what is relevant to: {instruction}.{asof_note}\n"
+        "Report the most recent value(s) of the series with their exact date(s), the unit, and any "
+        "directly relevant figures. Preserve all numbers and dates verbatim. Be concise (<300 words). "
+        "If the page has none of this, say 'no relevant data'.\n\n=== PAGE ===\n" + windowed)
+    try:
+        resp = await client.chat([{"role": "user", "content": prompt}])
+        out = (getattr(resp, "content", "") or "").strip()
+        return out or None
+    except Exception:
+        return None
+
+
+
+# --------------------------------------------------------------------------------------
 # tools
 # --------------------------------------------------------------------------------------
 @tool("web_search",
@@ -224,50 +362,56 @@ async def web_search(args: dict) -> dict:
 
 
 @tool("read_webpage",
-      "Fetch a URL as clean reader text (Jina r.jina.ai). Args: url (str). If the page's "
-      "publication date is after the run's as-of cutoff, the page is blocked (it did not exist "
-      "at as-of); otherwise an as-of banner is prepended and content is size-capped.",
-      {"url": str})
+      "Fetch a URL as clean reader text (Jina). Args: url (str), instruction (str, optional: what "
+      "to extract, e.g. 'the most recent value and date of the series'). Small pages return whole; "
+      "large pages are reduced to the instruction-relevant facts (numbers/dates preserved) rather "
+      "than blindly truncated. Honors the as-of cutoff: post-cutoff/target-date lines are removed.",
+      {"url": str, "instruction": str})
 async def read_webpage(args: dict) -> dict:
     cutoff = _cutoff()
-    headers = {"X-Return-Format": "markdown"}
-    key = os.environ.get("JINA_API_KEY")
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    async with httpx.AsyncClient(timeout=90, trust_env=False, follow_redirects=True) as c:
-        r = await c.get(f"{JINA_READER}/{args['url']}", headers=headers)
-        r.raise_for_status()
-        text = r.text
+    instruction = (args.get("instruction") or
+                   "the most recent value(s), date(s), unit, and figures of the series in question")
+    try:
+        text, src = await _fetch_clean(args["url"])
+    except Exception as exc:
+        return {"content": [{"type": "text", "text":
+                f"[fetch failed for {args['url']}: {exc}. Do NOT retry this URL — use the search "
+                f"snippets or try a different source.]"}]}
 
+    banner = ""
     if cutoff:
-        # Jina prepends a metadata block incl. "Published Time:" when the source exposes it.
         pub = None
         m = re.search(r"Published Time:\s*(.+)", text)
         if m:
             pub = parse_loose_date(m.group(1))
         verdict = check_as_of(text if pub is None else f"Published Time: {pub}", cutoff,
                               lambda _t: pub)
-        # Policy here is LENIENT on unknown pub date (a reader of an undated page is still
-        # useful), but STRICT when a publication date is known and post-cutoff: that page did
-        # not exist at as-of, so block it outright.
         if pub is not None and not verdict.allowed:
             return {"content": [{"type": "text", "text":
                     f"[BLOCKED: page published {pub} is after as-of cutoff {cutoff}; cannot be used]"}]}
-        # Strip lines that name the target date (they carry the realized value to be predicted).
         target = _target()
         stripped = 0
-        if target:
-            kept = []
-            for ln in text.splitlines():
-                if _mentions_target(ln, target) or _has_post_cutoff_date(ln, cutoff):
-                    stripped += 1
-                    continue
-                kept.append(ln)
-            text = "\n".join(kept)
-        banner = (f"[AS-OF {cutoff}] Ignore anything dated after {cutoff}. Detected publication "
-                  f"date: {pub or 'unknown'}. {stripped} target/post-cutoff line(s) removed.\n\n")
-        text = banner + text
-    return {"content": [{"type": "text", "text": text[:READ_CHAR_CAP]}]}
+        kept = []
+        for ln in text.splitlines():
+            if (target and _mentions_target(ln, target)) or _has_post_cutoff_date(ln, cutoff):
+                stripped += 1
+                continue
+            kept.append(ln)
+        text = "\n".join(kept)
+        banner = (f"[AS-OF {cutoff}] Ignore anything dated after {cutoff}; detected pub date "
+                  f"{pub or 'unknown'}; {stripped} target/post-cutoff line(s) removed.\n\n")
+
+    # No blind truncation. Small page -> return whole; large page -> extract relevant facts.
+    if len(text) <= RETURN_BUDGET:
+        return {"content": [{"type": "text", "text": banner + text}]}
+    extracted = await _extract_relevant(text, instruction, cutoff)
+    if extracted:
+        body = (f"[large page reduced to instruction-relevant facts via extractor; "
+                f"original {len(text)} chars]\nInstruction: {instruction}\n\n{extracted}")
+    else:
+        body = (f"[large page ({len(text)} chars) reduced by relevance windowing]\n\n"
+                + _relevance_window(text, instruction, RETURN_BUDGET))
+    return {"content": [{"type": "text", "text": banner + body}]}
 
 
 @tool("exa_search",
