@@ -1,0 +1,10 @@
+# glm-5 via the apihy gateway (OpenAI-compatible Chat Completions). Selected by `agent.llm: apihy_glm5`.
+# This is the cheap default driver for the loop (no Claude tokens).
+agent:
+  client: openrouter_newapi      # generic Chat-Completions client; apihy is OpenAI-compatible
+  client_args:
+    model: glm-5
+    temperature: 0.2
+    max_tokens: 8192
+    api_key_env: apihy_API_KEY_glm
+    base_url_env: apihy_BASE_URL

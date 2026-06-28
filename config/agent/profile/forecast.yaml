@@ -1,0 +1,8 @@
+# Named agent profile (mirrors galaxy config/agent/profile/forecast.yaml, leaner).
+# The worker is a forecaster; cognition is in the playbook prompt, not here.
+forecast_noskill:
+  kind: forecast
+  llm_client: ${llm.agent.client}
+  llm_client_args: ${llm.agent.client_args}
+  tool_set: ${toolsets.no_tools}      # default toolset; a run can override via agent.toolset
+  playbook_dir: futurecast/playbook

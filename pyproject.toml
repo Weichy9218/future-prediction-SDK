@@ -1,0 +1,20 @@
+[project]
+name = "futurecast"
+version = "0.0.1"
+description = "Thin forecasting agent: provider-agnostic loop + as-of guard + scorable output + experience library."
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",          # core/llm clients (harvested) use the OpenAI SDK
+    "omegaconf>=2.3",
+    "python-dotenv>=1.0",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+# Cheap model loop (default) needs only the base deps. Optional extras:
+claude = ["claude-agent-sdk>=0.2", "anthropic>=0.40"]   # optional Claude backend / Agent SDK runner
+score  = []   # add the verl-tool-future path dep in your env: `uv pip install -e /Users/weichy/code/verl-tool-future`
+dev    = ["pytest>=8", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+include = ["futurecast*"]

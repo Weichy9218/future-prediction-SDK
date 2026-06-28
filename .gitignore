@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+experiments/**/notes/
+*.egg-info/
+.pytest_cache/
+agent_sdk/claude-code-router/
+agent_sdk/ccr_home/
+log/

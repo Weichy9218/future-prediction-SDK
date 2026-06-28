@@ -1,0 +1,35 @@
+{
+  "PORT": 3456,
+  "LOG": true,
+  "API_TIMEOUT_MS": 600000,
+  "Providers": [
+    {
+      "name": "apihy",
+      "api_base_url": "https://zgc.apihy.com/v1/chat/completions",
+      "api_key": "${apihy_API_KEY_glm}",
+      "models": [
+        "glm-5",
+        "glm-5.1",
+        "qwen3-235b-a22b-instruct-2507",
+        "deepseek-v4-flash"
+      ]
+    },
+    {
+      "name": "haoxiang",
+      "api_base_url": "https://ie-crs.haoxiang.ai/v1/chat/completions",
+      "api_key": "${GPT_sub2api_apikey}",
+      "models": [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini"
+      ]
+    }
+  ],
+  "Router": {
+    "default": "apihy,glm-5",
+    "background": "apihy,glm-5",
+    "think": "apihy,glm-5",
+    "longContext": "apihy,glm-5",
+    "webSearch": "apihy,glm-5"
+  }
+}

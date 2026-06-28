@@ -1,0 +1,40 @@
+# Tool configuration — mirrors galaxy-selfevolve/config/agent/tool/default.yaml.
+#
+# THE TOOL-ENABLE MECHANISM (answer to "should config control which tools?"):
+#   `toolsets.<name>` is an explicit allow-list of tool names. The runner exposes to the model
+#   ONLY the tools whose names appear in the selected toolset. A tool absent from the list is
+#   never advertised. There is no per-tool `enabled` flag — presence in the list = enabled.
+#   A run yaml picks one toolset via `agent.toolset: <name>`.
+#
+# THE TOOLS themselves call third-party APIs DIRECTLY (Serper / Jina / Exa), exactly like
+# galaxy core/tools — NOT a model provider's built-in WebSearch. Keys come from .env.
+global:
+  tool_timeouts:
+    default: 60
+    web_search: 45
+    read_webpage: 90
+    execute_python_code: 60
+  # tool-side LLM (e.g. summarizing a fetched page) can run on a cheap model:
+  tool_llm:
+    routes:
+      search_summary:
+        client: openrouter_newapi
+        model: glm-5
+        api_key_env: apihy_API_KEY_glm
+        base_url_env: apihy_BASE_URL
+  # which provider each tool uses (keys read from .env)
+  providers:
+    web_search: { api: serper, key_env: SERPER_API_KEY }       # https://google.serper.dev
+    web_search_neural: { api: exa, key_env: EXA_API_KEY }
+    read_webpage: { api: jina, key_env: JINA_API_KEY, base_url_env: JINA_BASE_URL }  # r.jina.ai
+    execute_python_code: { api: local }
+
+toolsets:
+  no_tools: []                                  # knowledge-only (matches the floor / smoke runs)
+  main:                                         # the standard forecasting surface
+    - web_search
+    - read_webpage
+    - execute_python_code
+  search_only:
+    - web_search
+    - read_webpage
