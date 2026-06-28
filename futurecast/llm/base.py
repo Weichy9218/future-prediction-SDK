@@ -318,7 +318,7 @@ class OpenAISDKClient(BaseLLMClient):
     ) -> List[str]:
         texts: List[str] = []
         for source in (message, response):
-            for field_name in ("reasoning_summary", "reasoning"):
+            for field_name in ("reasoning_summary", "reasoning", "reasoning_content"):
                 texts.extend(
                     self._extract_reasoning_summary_texts(
                         self.get_field_value(source, field_name)
