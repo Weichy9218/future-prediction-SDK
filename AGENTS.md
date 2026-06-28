@@ -28,11 +28,18 @@ make that failure mode structurally impossible here.
 ## Boundaries of ownership (what we control vs rent)
 
 - **Own** (small, ours, ~hundreds of lines): playbook, as-of guard, scorable output, experience
-  library, the thin loop.
-- **Harvest** (generic, well-tested, copied in): `futurecast/llm/` (from core/llm); scoring +
-  question collection from `verl-tool-future`.
-- **Rent** (don't rebuild): the agent loop machinery (Claude Agent SDK) and the model providers.
-  Default models are cheap (apihy glm/qwen via `CoreLLMBackend`); Claude is optional.
+  library, and the run harness (`agent_sdk/`: ccr config generation + tools + runner).
+- **Harvest** (generic, well-tested, copied in): `futurecast/llm/` (from core/llm — kept as the
+  reasoning-capable direct client; see below); scoring + question collection from `verl-tool-future`.
+- **Rent** (don't rebuild): the agent loop machinery (Claude Agent SDK) AND the model routing
+  (claude-code-router). A run picks its gateway model via `agent_sdk/gen_ccr_config.py`
+  (apihy glm/qwen, haoxiang gpt); the same agent + tool surface serves all of them. There is no
+  hand-written Python loop here — it was removed once ccr covered gpt too.
+
+> Reasoning note (verified): ccr routes via `/chat/completions`, which carries `reasoning_content`
+> for glm but NOT for gpt. To capture a hidden gpt reasoning *summary* you must use the Responses
+> API (`futurecast/llm/`, `summary:auto`) outside the agent loop. The agent rollout still captures
+> each model's *visible* reasoning text.
 
 ## When adding code, ask
 - Does this put forecasting cognition in Python instead of the prompt? → stop (guardrail #1).
