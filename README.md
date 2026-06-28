@@ -94,10 +94,12 @@ log/<run_group>/<task_id>-<model_short>[-tools]/
   → 前身"gpt 不调工具"的根因（被移除的 Path B 手写 loop 只 `chat(tools=None)` 调一次、
   没有 agent loop）被**正确修复**：把 gpt 路由进同一个租用 agent loop，而非再写第二个手写 loop。
 - **glm-5 经 Agent SDK + 工具**：同样多步调用，作为 gpt-vs-glm 的同工具公平对比。
-- **reasoning 保留（经验性结论）**：ccr 走 `/chat/completions`。glm 该端点带 `reasoning_content`；
-  **gpt 不带**。所以 ccr 无法把 gpt 的隐藏 reasoning summary 写进 transcript。要拿 gpt 的隐藏
-  reasoning *summary* 必须用 Responses API（`futurecast/llm/`, `summary:auto`），在 agent loop 之外。
-  agent rollout 仍然记录每个模型的**可见**推理文本。
+- **reasoning 保留**：ccr provider 开 `reasoning` transformer + Agent SDK 开 `thinking`，模型的中间
+  思考即作为 `thinking` 块写进 rollout（glm 上已实测）。注意：glm `reasoning_content` 稳定但
+  thinking+工具会触发 ccr 入参重复 bug；gpt 经 chat/completions 时有时无（稳定路径是 Responses API
+  `futurecast/llm/`）。完整轨迹分析与优化方向见 **`docs/analysis_phase2.md`**。
+- **as-of 守卫**：在三层(tbs/发布日/snippet)之上新增**目标日脱敏**——凡 snippet/页面行提到被预测的
+  目标日(任意格式，含无年份 "June 26")即抹除，已离线验证堵住 CSI300 的 Yahoo 已实现值泄漏。
 - **知识地板**（无工具、纯知识）：`log/baseline_floor_0501/`，中位相对误差 ~45%；区间在名义 80%
   覆盖下只命中 1/5 → 系统性过自信。playbook 据此要求"先核对量级、把区间放宽"。
 

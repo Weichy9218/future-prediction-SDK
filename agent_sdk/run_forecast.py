@@ -1,21 +1,28 @@
-"""Run one forecast question through the Claude Agent SDK, driven by a CHEAP non-Claude model.
+"""Run one FutureWorld/FutureX question through the Claude Agent SDK, driven by a CHEAP
+non-Claude model, with the model's THINKING captured into the rollout.
 
 Routing (no Claude tokens spent):
-  Claude Agent SDK -> spawns the `claude` CLI -> ANTHROPIC_BASE_URL=127.0.0.1:3456
-  -> vendored claude-code-router (local config) -> a gateway model. The model is chosen by
-  ccr's Router (regenerated per run by gen_ccr_config.py): `glm-5` (apihy) or `gpt-5.5`
-  (haoxiang). Same agent loop, same tool surface for both — this is what makes a gpt-vs-glm
-  comparison fair and what fixes "gpt doesn't call tools" without a second hand-written loop.
+  Claude Agent SDK -> claude CLI -> ANTHROPIC_BASE_URL=127.0.0.1:3456 -> vendored ccr
+  -> gateway model (glm-5 @ apihy, gpt-5.5 @ haoxiang). The model is chosen by ccr's Router
+  (regenerated per run by gen_ccr_config.py); the SAME agent + tool surface serves all models.
 
-Tools (`--tools`): our in-process Serper/Jina/Exa MCP tools (real keys, as-of guarded) PLUS the
-local Bash/Read/Edit/Write CLI tools. Anthropic's built-in WebSearch/WebFetch are disallowed
-(they don't execute off-Claude). as-of is enforced at the tool boundary via FUTURECAST_AS_OF.
+Reasoning capture (the trajectory must explain HOW/WHY the answer was produced):
+  We enable extended thinking on the Agent SDK side; ccr translates that to the upstream
+  `reasoning.effort` and converts the returned `reasoning_content` back into Anthropic
+  `thinking` blocks (provider transformer `reasoning`). So glm/gpt's intermediate reasoning
+  lands in the CLI rollout transcript alongside each assistant turn — analyzable, not dropped.
 
-Output: a standardized rollout + parsed result under
-  log/<run_group>/<task_id>-<model_short>/{rollout.jsonl, result.json}
+Tools (`--tools`): our in-process Serper/Jina/Exa MCP tools (real keys, as-of guarded) PLUS
+the local Bash/Read/Edit/Write CLI tools. Anthropic's built-in WebSearch/WebFetch are
+disallowed (they don't execute off-Claude). as-of is enforced at the tool boundary
+(FUTURECAST_AS_OF) using the per-question cutoff (target date - 1 day).
+
+The question's OWN answer contract governs output (`\boxed{number}`); we do not impose a second
+format. The final number is extracted lightly from the box; the reasoning/process is the rollout.
 
 Usage:
   .venv/bin/python agent_sdk/run_forecast.py [--model glm-5|gpt-5.5] [--tools]
+      [--question-file tasks/sample_futureworld_0624_30.jsonl] [--task-index 0]
 """
 from __future__ import annotations
 
@@ -30,54 +37,63 @@ from pathlib import Path
 import anyio
 from claude_agent_sdk import (
     query, ClaudeAgentOptions, AssistantMessage, ResultMessage,
-    TextBlock, ToolUseBlock, project_key_for_directory,
+    TextBlock, ThinkingBlock, ToolUseBlock, project_key_for_directory,
 )
 
 ROUTER = "http://127.0.0.1:3456"
 HERE = Path(__file__).resolve().parent
 CWD = HERE.parent  # the futurecast repo root
-sys.path.insert(0, str(HERE))  # make tools_mcp importable
+sys.path.insert(0, str(HERE))   # tools_mcp
+sys.path.insert(0, str(CWD))    # futurecast package
+
+from futurecast.data.loader import load_questions  # noqa: E402
 
 PLAYBOOK = (CWD / "futurecast/playbook/playbook_A_numeric.md").read_text(encoding="utf-8")
-
-# The forecast task. as-of is enforced mechanically at the tool boundary (FUTURECAST_AS_OF),
-# not merely stated in the prompt.
-TASK_ID = "futureworld_hog"
-RUN_GROUP = os.environ.get("FUTURECAST_RUN_GROUP", "futureworld_hog_0615")
-AS_OF = "2026-06-14"
-QUESTION = (
-    "You are forecasting a recurring numeric series.\n"
-    f"AS-OF CUTOFF: {AS_OF}. Use only information available up to this date; do not use any "
-    "knowledge of the realized value.\n\n"
-    "On 2026-06-15 (UTC+8), what will Local Hybrid Hog (土杂猪) hog price (生猪价格) be, in CNY "
-    "per kilogram (元/公斤)?\n\n"
-    "End with: \\boxed{<plain number>} then a one-line JSON "
-    '{"point":n,"low":n,"high":n,"anchor":"...","uncertainty":"...","confidence":"low|med|high","sources":["..."]}.'
-)
-
+DEFAULT_QFILE = "tasks/sample_futureworld_0624_30.jsonl"
 _MODEL_SHORT = {"glm-5": "glm5", "glm-5.1": "glm51", "gpt-5.5": "gpt55", "gpt-5.4": "gpt54"}
 
-
-def _parse_result(text: str) -> dict:
-    """Pull the boxed answer + trailing JSON object out of the model's final text."""
-    out: dict = {}
-    m = re.search(r"\\boxed\{([^}]*)\}", text)
-    if m:
-        out["answer"] = m.group(1).strip()
-    # last {...} JSON object in the text
-    for m in reversed(list(re.finditer(r"\{[^{}]*\}", text))):
-        try:
-            obj = json.loads(m.group(0))
-            if isinstance(obj, dict) and ("point" in obj or "anchor" in obj):
-                out.update(obj)
-                break
-        except json.JSONDecodeError:
-            continue
-    return out
+# The playbook tells the model HOW to forecast; the benchmark question carries the exact answer
+# contract. We do NOT append our own output format — that would conflict with the question's
+# "Do not use any other format" instruction.
+SYSTEM_PROMPT = PLAYBOOK + (
+    "\n\n## Tools & boundary\n"
+    "Use `web_search` / `read_webpage` / `exa_search` to find the most recent authoritative value "
+    "of THIS exact series at or before the as-of cutoff. Every fetch is as-of guarded: anything "
+    "dated after the cutoff is blocked or redacted, so do not try to read the realized value.\n"
+    "Follow the question's required answer format exactly."
+)
 
 
-async def main(model: str, use_tools: bool) -> None:
-    os.environ["FUTURECAST_AS_OF"] = AS_OF  # the as-of guard (tools_mcp) reads this
+def _extract_boxed(text: str) -> str | None:
+    """Light extraction of the benchmark's own `\\boxed{number}` contract (no heavy fallback)."""
+    matches = re.findall(r"\\boxed\{([^}]*)\}", text)
+    return matches[-1].strip() if matches else None
+
+
+async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None:
+    questions = load_questions(CWD / qfile if not os.path.isabs(qfile) else qfile)
+    if not questions:
+        raise SystemExit(f"no questions in {qfile}")
+    q = questions[task_index]
+    as_of = q.as_of or ""
+    os.environ["FUTURECAST_AS_OF"] = as_of   # the as-of guard (tools_mcp) reads this
+    os.environ["FUTURECAST_TARGET"] = q.target_date or ""  # the date whose value must NOT leak
+
+    # Per-question as-of framing. The benchmark's target dates can be in the *indexable past*
+    # relative to wall-clock, so a general agent will reason "this already happened, let me look
+    # up the realized value" and leak the answer (observed in trajectories). We reframe the
+    # vantage point: treat the cutoff as 'today', making the target genuinely future + unknowable.
+    as_of_frame = (
+        f"\n\n## Vantage point (hard rule)\n"
+        f"Treat **{as_of}** as the current date ('today'). The target date **{q.target_date}** has "
+        f"NOT happened yet from your vantage point: its realized value does not exist and cannot be "
+        f"looked up. You must FORECAST it from information available on or before {as_of}. If any "
+        f"source appears to state the value AT the target date, it is post-cutoff — ignore it (the "
+        f"fetch guard also blocks/redacts such data). Anchor on the latest value at/<= {as_of}, then "
+        f"extrapolate."
+    )
+    system_prompt = SYSTEM_PROMPT + as_of_frame
+
     env = dict(os.environ)
     env.update(
         ANTHROPIC_BASE_URL=ROUTER,
@@ -91,26 +107,32 @@ async def main(model: str, use_tools: bool) -> None:
         from tools_mcp import create_server, ALLOWED, DISALLOWED_BUILTINS
         mcp_servers = {"futurecast": create_server()}
         allowed, disallowed = ALLOWED, DISALLOWED_BUILTINS
+
     options = ClaudeAgentOptions(
-        system_prompt=PLAYBOOK,
-        model="claude-sonnet-4-5",          # ccr Router overrides -> chosen gateway model
+        system_prompt=system_prompt,
+        model="claude-sonnet-4-5",                 # ccr Router overrides -> chosen gateway model
         permission_mode="bypassPermissions",
         mcp_servers=mcp_servers,
         allowed_tools=allowed,
         disallowed_tools=disallowed,
-        max_turns=8 if use_tools else 3,
+        thinking={"type": "enabled", "budget_tokens": 4000},  # -> ccr -> upstream reasoning.effort
+        max_turns=10 if use_tools else 3,
         cwd=str(CWD),
         env=env,
         setting_sources=[],
     )
-    prompt = QUESTION if use_tools else QUESTION + "\n\nDo not use any tools; answer from your own reasoning."
 
-    print(f"# routing: Agent SDK -> {ROUTER} -> {model} | tools={use_tools} | as_of={AS_OF}\n", flush=True)
-    final_text, session_id, result, n_tool = "", None, None, 0
-    async for msg in query(prompt=prompt, options=options):
+    print(f"# routing: Agent SDK -> {ROUTER} -> {model} | tools={use_tools} | "
+          f"task={q.task_id} as_of={as_of} target={q.target_date}\n", flush=True)
+    final_text, thinking_text, session_id, result, n_tool, n_think = "", "", None, None, 0, 0
+    async for msg in query(prompt=q.task_question, options=options):
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
-                if isinstance(block, TextBlock):
+                if isinstance(block, ThinkingBlock):
+                    n_think += 1
+                    thinking_text += block.thinking + "\n"
+                    print(f"\n[thinking] {block.thinking[:240]}…", flush=True)
+                elif isinstance(block, TextBlock):
                     final_text += block.text
                     print(block.text, end="", flush=True)
                 elif isinstance(block, ToolUseBlock):
@@ -121,15 +143,15 @@ async def main(model: str, use_tools: bool) -> None:
             session_id = getattr(msg, "session_id", None)
 
     print("\n\n=== RESULT ===", flush=True)
-    print("session_id:", session_id, "| tool_use count:", n_tool)
+    print(f"session_id: {session_id} | tool_use={n_tool} | thinking_blocks={n_think}")
     usage = getattr(result, "usage", None) if result else None
     if result is not None:
-        print("usage:", usage)
         print("total_cost_usd:", getattr(result, "total_cost_usd", None))
 
-    # --- standardized log output -------------------------------------------------------
+    # --- standardized, trajectory-first log output -------------------------------------
     short = _MODEL_SHORT.get(model, model.replace(".", "").replace("-", ""))
-    out_dir = CWD / "log" / RUN_GROUP / f"{TASK_ID}-{short}{'-tools' if use_tools else ''}"
+    run_group = f"futureworld_{(q.target_date or 'NA')}"
+    out_dir = CWD / "log" / run_group / f"{q.task_id}-{short}{'-tools' if use_tools else ''}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     proj = Path.home() / ".claude/projects" / project_key_for_directory(str(CWD))
@@ -140,24 +162,25 @@ async def main(model: str, use_tools: bool) -> None:
     if transcript and transcript.exists():
         shutil.copy(transcript, out_dir / "rollout.jsonl")
 
-    parsed = _parse_result(final_text)
     result_json = {
-        "task_id": TASK_ID, "model": model, "as_of": AS_OF, "tools": use_tools,
-        "tool_use_count": n_tool, "session_id": session_id,
-        "answer": parsed.get("answer"), "point": parsed.get("point"),
-        "low": parsed.get("low"), "high": parsed.get("high"),
-        "anchor": parsed.get("anchor", ""), "uncertainty": parsed.get("uncertainty", ""),
-        "confidence": parsed.get("confidence", ""), "sources": parsed.get("sources", []),
-        "usage": usage if isinstance(usage, dict) else (dict(usage) if usage else None),
+        "task_id": q.task_id, "model": model, "as_of": as_of, "target_date": q.target_date,
+        "forecast_type": q.forecast_type, "tools": use_tools,
+        "tool_use_count": n_tool, "thinking_blocks": n_think, "session_id": session_id,
+        "answer": _extract_boxed(final_text),         # the one final answer (benchmark contract)
+        "reasoning_summary": thinking_text.strip(),    # the captured thinking (process/why)
+        "final_text": final_text.strip(),
+        "usage": dict(usage) if isinstance(usage, dict) else (dict(usage) if usage else None),
     }
     (out_dir / "result.json").write_text(json.dumps(result_json, ensure_ascii=False, indent=2), encoding="utf-8")
     print("ROLLOUT:", out_dir / "rollout.jsonl", "(exists:", (out_dir / "rollout.jsonl").exists(), ")")
-    print("RESULT :", out_dir / "result.json")
+    print("RESULT :", out_dir / "result.json", "| answer:", result_json["answer"])
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="glm-5")
     ap.add_argument("--tools", action="store_true")
+    ap.add_argument("--question-file", default=DEFAULT_QFILE)
+    ap.add_argument("--task-index", type=int, default=0)
     a = ap.parse_args()
-    anyio.run(main, a.model, a.tools)
+    anyio.run(main, a.model, a.tools, a.question_file, a.task_index)

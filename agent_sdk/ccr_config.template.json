@@ -12,7 +12,8 @@
         "glm-5.1",
         "qwen3-235b-a22b-instruct-2507",
         "deepseek-v4-flash"
-      ]
+      ],
+      "transformer": { "use": ["reasoning"] }
     },
     {
       "name": "haoxiang",
@@ -22,7 +23,8 @@
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.4-mini"
-      ]
+      ],
+      "transformer": { "use": ["reasoning"] }
     }
   ],
   "Router": {

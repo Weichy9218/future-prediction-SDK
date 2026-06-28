@@ -77,6 +77,11 @@ def parse_loose_date(text: str) -> Optional[str]:
     if m:
         return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
+    # US order with year last: 06-26-2026 / 6/26/2026 (common in data-vendor snippets, e.g. CEIC)
+    m = re.search(r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b", t)
+    if m:
+        return f"{int(m.group(3)):04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+
     # 'Jun 10, 2026' or 'June 10, 2026'
     m = re.search(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})\b", t)
     if m and m.group(1)[:3].lower() in _MONTHS:
@@ -104,9 +109,10 @@ def _after_cutoff(iso_date: Optional[str], cutoff: str) -> bool:
 # Used to catch the real leak: a price page whose nominal publish date is pre-cutoff but whose
 # snippet embeds today's (post-cutoff) value, e.g. "江苏 2026/6/27 ... 土杂猪 9.80".
 _INLINE_DATE = re.compile(
-    r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b"
-    r"|\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})\b"
-    r"|(\d{4})年(\d{1,2})月(\d{1,2})日")
+    r"(?<!\d)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)"   # 2026-06-26 / 2026/6/27
+    r"|(?<!\d)(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?!\d)"  # 06-26-2026 / 6/26/2026 (US, year last)
+    r"|([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})"          # Jun 26, 2026
+    r"|(\d{4})年(\d{1,2})月(\d{1,2})日")                  # 2026年6月26日 (may be glued to CJK)
 
 
 def _has_post_cutoff_date(text: str, cutoff: str) -> bool:
@@ -116,6 +122,36 @@ def _has_post_cutoff_date(text: str, cutoff: str) -> bool:
         if _after_cutoff(iso, cutoff):
             return True
     return False
+
+
+def _target() -> Optional[str]:
+    """The question's target date (ISO) — the value AT this date is what must NOT leak."""
+    v = (os.environ.get("FUTURECAST_TARGET") or "").strip()
+    return v or None
+
+
+def _mentions_target(text: str, target: str) -> bool:
+    """True if `text` names the target date in any common form, INCLUDING yearless ones.
+
+    This is the precise leak guard: the realized value is usually presented next to the target
+    date (e.g. Yahoo's 'At close: June 26', a 'June 26, 2026' quote, '6月26日'). Yearless dates
+    evade the post-cutoff scan, so we match the target's month/day directly.
+    """
+    try:
+        d = date.fromisoformat(target)
+    except ValueError:
+        return False
+    mon_abbr = ["jan", "feb", "mar", "apr", "may", "jun",
+                "jul", "aug", "sep", "oct", "nov", "dec"][d.month - 1]
+    pats = [
+        rf"(?<!\d){d.year}[-/]0?{d.month}[-/]0?{d.day}(?!\d)",       # 2026-06-26
+        rf"(?<!\d)0?{d.month}[-/]0?{d.day}[-/]{d.year}(?!\d)",       # 06-26-2026
+        rf"{d.year}年0?{d.month}月0?{d.day}日",                      # 2026年6月26日
+        rf"0?{d.month}月0?{d.day}日",                                # 6月26日 (yearless)
+        rf"(?i){mon_abbr}[a-z]*\.?\s+0?{d.day}(?!\d)",              # June 26 / Jun 26 (yearless)
+    ]
+    return any(re.search(p, text or "") for p in pats)
+
 
 
 
@@ -141,6 +177,7 @@ async def web_search(args: dict) -> dict:
     if not key:
         return {"content": [{"type": "text", "text": "[web_search error: SERPER_API_KEY not set]"}]}
     cutoff = _cutoff()
+    target = _target()
     num = max(1, min(int(args.get("num") or 8), 10))
     page = max(1, int(args.get("page") or 1))
     payload = {"q": args["query"], "num": num, "page": page}
@@ -169,15 +206,19 @@ async def web_search(args: dict) -> dict:
             continue
         snippet = it.get("snippet", "") or ""
         # Second guard layer: a pre-cutoff page can still leak a post-cutoff value inside its
-        # snippet (dynamic price pages). Redact such snippets; keep title+link so the model
-        # knows the source exists and can fetch the *historical* value via read_webpage.
-        if cutoff and _has_post_cutoff_date(snippet, cutoff):
-            snippet = "[snippet redacted: embeds data dated after the as-of cutoff]"
+        # snippet (dynamic price pages), and the realized value is usually shown next to the
+        # TARGET date — often yearless ("At close: June 26"). Redact such snippets; keep
+        # title+link so the model knows the source exists and can fetch the *historical* value.
+        leaks = (cutoff and _has_post_cutoff_date(snippet, cutoff)) or \
+                (target and _mentions_target(snippet, target)) or \
+                (target and _mentions_target(it.get('title', '') or '', target))
+        if leaks:
+            snippet = "[snippet redacted: references the target date or post-cutoff data]"
             redacted += 1
         tag = f" [{when}]" if when else ""
         lines.append(f"- {it.get('title','')}{tag}\n  {link}\n  {snippet}")
-    head = (f"[as-of {cutoff}: capped to <= cutoff; {dropped} post-cutoff result(s) dropped, "
-            f"{redacted} snippet(s) redacted]\n") if cutoff else ""
+    head = (f"[as-of {cutoff} | target {target} blocked: {dropped} post-cutoff result(s) dropped, "
+            f"{redacted} snippet(s) redacted]\n") if (cutoff or target) else ""
     body = "\n".join(lines) or "[no results]"
     return {"content": [{"type": "text", "text": head + body}]}
 
@@ -212,8 +253,19 @@ async def read_webpage(args: dict) -> dict:
         if pub is not None and not verdict.allowed:
             return {"content": [{"type": "text", "text":
                     f"[BLOCKED: page published {pub} is after as-of cutoff {cutoff}; cannot be used]"}]}
-        banner = (f"[AS-OF {cutoff}] Ignore anything on this page dated after {cutoff}. "
-                  f"Detected publication date: {pub or 'unknown'}.\n\n")
+        # Strip lines that name the target date (they carry the realized value to be predicted).
+        target = _target()
+        stripped = 0
+        if target:
+            kept = []
+            for ln in text.splitlines():
+                if _mentions_target(ln, target) or _has_post_cutoff_date(ln, cutoff):
+                    stripped += 1
+                    continue
+                kept.append(ln)
+            text = "\n".join(kept)
+        banner = (f"[AS-OF {cutoff}] Ignore anything dated after {cutoff}. Detected publication "
+                  f"date: {pub or 'unknown'}. {stripped} target/post-cutoff line(s) removed.\n\n")
         text = banner + text
     return {"content": [{"type": "text", "text": text[:READ_CHAR_CAP]}]}
 

@@ -36,10 +36,13 @@ make that failure mode structurally impossible here.
   (apihy glm/qwen, haoxiang gpt); the same agent + tool surface serves all of them. There is no
   hand-written Python loop here — it was removed once ccr covered gpt too.
 
-> Reasoning note (verified): ccr routes via `/chat/completions`, which carries `reasoning_content`
-> for glm but NOT for gpt. To capture a hidden gpt reasoning *summary* you must use the Responses
-> API (`futurecast/llm/`, `summary:auto`) outside the agent loop. The agent rollout still captures
-> each model's *visible* reasoning text.
+> Reasoning capture (verified, see `docs/analysis_phase2.md`): with the `reasoning` transformer on
+> each ccr provider + `thinking` enabled in the Agent SDK, the model's intermediate reasoning lands
+> in the rollout as Anthropic `thinking` blocks. Caveats: glm exposes `reasoning_content` reliably
+> (but ccr 2.0.0 + thinking duplicates glm tool-call args — a bug); haoxiang/gpt returns
+> `reasoning_content` only intermittently over chat/completions (the reliable gpt path is the
+> Responses API `summary:auto`, i.e. `futurecast/llm/`). A self-owned model-adapter is the proposed
+> fix for both.
 
 ## When adding code, ask
 - Does this put forecasting cognition in Python instead of the prompt? → stop (guardrail #1).
