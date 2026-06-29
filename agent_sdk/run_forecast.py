@@ -161,25 +161,33 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
           f"task={q.task_id} as_of={as_of} target={q.target_date}\n# config: {config_summary(cfg)}\n",
           flush=True)
     final_text, thinking_text, session_id, result, n_tool, n_think = "", "", None, None, 0, 0
-    async for msg in query(prompt=q.task_question, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, ThinkingBlock):
-                    n_think += 1
-                    thinking_text += block.thinking + "\n"
-                    print(f"\n[thinking] {block.thinking[:240]}…", flush=True)
-                elif isinstance(block, TextBlock):
-                    final_text += block.text
-                    print(block.text, end="", flush=True)
-                elif isinstance(block, ToolUseBlock):
-                    n_tool += 1
-                    print(f"\n[tool_use {block.name} {block.input}]", flush=True)
-        elif isinstance(msg, ResultMessage):
-            result = msg
-            session_id = getattr(msg, "session_id", None)
+    run_error = None
+    try:
+        async for msg in query(prompt=q.task_question, options=options):
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, ThinkingBlock):
+                        n_think += 1
+                        thinking_text += block.thinking + "\n"
+                        print(f"\n[thinking] {block.thinking[:240]}…", flush=True)
+                    elif isinstance(block, TextBlock):
+                        final_text += block.text
+                        print(block.text, end="", flush=True)
+                    elif isinstance(block, ToolUseBlock):
+                        n_tool += 1
+                        print(f"\n[tool_use {block.name} {block.input}]", flush=True)
+            elif isinstance(msg, ResultMessage):
+                result = msg
+                session_id = getattr(msg, "session_id", None)
+    except Exception as exc:  # e.g. "Reached maximum number of turns" — keep the partial rollout
+        # The SDK raises on max-turns / mid-stream errors. Don't lose the run: record the error and
+        # fall through to write whatever was captured (rollout + thinking + any boxed answer).
+        run_error = f"{type(exc).__name__}: {exc}"
+        print(f"\n[run-error captured, writing partial result] {run_error}", flush=True)
 
     print("\n\n=== RESULT ===", flush=True)
-    print(f"session_id: {session_id} | tool_use={n_tool} | thinking_blocks={n_think}")
+    print(f"session_id: {session_id} | tool_use={n_tool} | thinking_blocks={n_think}"
+          f"{' | ERROR: ' + run_error if run_error else ''}")
     usage = getattr(result, "usage", None) if result else None
     if result is not None:
         print("total_cost_usd:", getattr(result, "total_cost_usd", None))
@@ -202,6 +210,7 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
         "forecast_type": q.forecast_type, "tools": use_tools, "config": config_summary(cfg),
         "tool_use_count": n_tool, "thinking_blocks": n_think, "session_id": session_id,
         "answer": _extract_boxed(final_text),         # the one final answer (benchmark contract)
+        "run_error": run_error,                        # set if the SDK raised (e.g. max-turns); else None
         "reasoning_summary": thinking_text.strip(),    # the captured thinking (process/why)
         "final_text": final_text.strip(),
         "usage": dict(usage) if isinstance(usage, dict) else (dict(usage) if usage else None),

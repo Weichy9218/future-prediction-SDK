@@ -45,8 +45,8 @@ class RunConfig:
     max_tokens: int = 8192               # per-turn completion cap
 
     # --- agent loop (read by the runner process) ---
-    max_turns: int = 14                  # agent turns when --tools (knowledge-only is capped at 3)
-    thinking_budget: int = 4000          # Anthropic extended-thinking budget_tokens
+    max_turns: int = 30                  # agent turns when --tools (knowledge-only is capped at 3)
+    thinking_budget: int = 8000          # Anthropic extended-thinking budget_tokens
     run_group: str = DEFAULT_RUN_GROUP   # output dir: log/<run_group>/<task>-<model>[-tools]/
 
     # --- as-of guard at the tool boundary (read by the tools) ---
