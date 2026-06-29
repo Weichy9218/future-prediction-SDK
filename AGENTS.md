@@ -34,14 +34,14 @@ make that failure mode structurally impossible here.
   of the adapter); scoring + question collection from `verl-tool-future`.
 - **Rent, unchanged** (don't rebuild): the agent **harness** — context management, planning, memory,
   the agent loop (Claude Agent SDK / claude CLI). We do NOT touch it; a run picks its gateway model
-  via `--model` and the SAME agent + tool surface serves all models. (We replaced claude-code-router
-  with our own adapter — owning model routing is the point; the harness stays rented.)
+  via `--model` and the SAME agent + tool surface serves all models. (Owning model routing is the
+  point; the harness stays rented.)
 
-> Reasoning capture (verified, see `docs/analysis_phase2.md` + the demo runs): the adapter replays
+> Reasoning capture (verified, see `docs/analysis_phase2.md`–`phase4.md`): the adapter replays
 > each turn as Anthropic SSE incl. `thinking` blocks built from the client's `reasoning_summary`, so
-> the model's intermediate reasoning lands in the rollout. glm exposes reasoning reliably and its
-> tool-call args are now clean (the ccr duplication bug is gone); gpt/haoxiang exposes a reasoning
-> summary only intermittently (Responses API), captured when present.
+> the model's intermediate reasoning lands in the rollout. glm exposes reasoning reliably with clean
+> tool-call args; gpt/haoxiang exposes a reasoning summary via the Responses API (captured when
+> present, reliable at effort=high).
 
 ## When adding code, ask
 - Does this put forecasting cognition in Python instead of the prompt? → stop (guardrail #1).

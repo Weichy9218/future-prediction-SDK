@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Fixed local entry point — run the forecast agent from THIS repo's own code only.
 #
-#   bash agent_sdk/run.sh                          # glm-5, knowledge-only
-#   bash agent_sdk/run.sh --tools                  # glm-5, tool-enabled multi-step rollout
-#   bash agent_sdk/run.sh --model gpt-5.5 --tools  # gpt-5.5 through the SAME agent + tools
+#   bash agent_sdk/run.sh --tools                                  # glm-5, tool-enabled rollout
+#   bash agent_sdk/run.sh --model gpt-5.5 --tools                  # gpt-5.5, SAME agent + tools
+#   bash agent_sdk/run.sh --model glm-5 --tools \                  # a specific benchmark question
+#       --question-file tasks/<file>.jsonl --task-index 0
 #
 # It (1) starts OUR owned LLM adapter (agent_sdk/llm_adapter.py) — a minimal Anthropic /v1/messages
-# endpoint backed by futurecast/llm (replaces claude-code-router; we own model routing + reasoning
-# capture), then (2) runs the Agent SDK forecast. The Agent SDK harness (context/plan/memory/loop)
-# is unchanged — only the model-routing layer is ours. HOME is redirected into agent_sdk/ccr_home so
-# the claude CLI writes its transcript there (the runner copies it into log/).
+# endpoint backed by futurecast/llm — then (2) runs the Agent SDK forecast. The Agent SDK harness
+# (context/plan/memory/loop) is rented unchanged; only the model-routing layer is ours. HOME is
+# redirected into agent_sdk/cli_home so the claude CLI writes its config/state + transcript there
+# (the runner copies the transcript into log/).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-export HOME="$HERE/ccr_home"             # claude CLI reads config/state + writes transcripts here
+export HOME="$HERE/cli_home"             # claude CLI reads config/state + writes transcripts here
 PORT=3456
 
 # Parse args: --model NAME selects the route; --tools (and others) are forwarded to the runner.

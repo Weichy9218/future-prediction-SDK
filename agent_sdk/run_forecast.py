@@ -2,27 +2,27 @@
 non-Claude model, with the model's THINKING captured into the rollout.
 
 Routing (no Claude tokens spent):
-  Claude Agent SDK -> claude CLI -> ANTHROPIC_BASE_URL=127.0.0.1:3456 -> vendored ccr
-  -> gateway model (glm-5 @ apihy, gpt-5.5 @ haoxiang). The model is chosen by ccr's Router
-  (regenerated per run by gen_ccr_config.py); the SAME agent + tool surface serves all models.
+  Claude Agent SDK -> claude CLI -> ANTHROPIC_BASE_URL=127.0.0.1:3456 -> OUR llm_adapter
+  -> gateway model (glm-5 @ apihy, gpt-5.5 @ haoxiang). The model is chosen by env
+  FUTURECAST_MODEL (set by run.sh); the SAME agent + tool surface serves all models.
 
 Reasoning capture (the trajectory must explain HOW/WHY the answer was produced):
-  We enable extended thinking on the Agent SDK side; ccr translates that to the upstream
-  `reasoning.effort` and converts the returned `reasoning_content` back into Anthropic
-  `thinking` blocks (provider transformer `reasoning`). So glm/gpt's intermediate reasoning
-  lands in the CLI rollout transcript alongside each assistant turn — analyzable, not dropped.
+  We enable extended thinking on the Agent SDK side; the adapter maps it to the upstream
+  `reasoning.effort` and replays the returned reasoning summary as Anthropic `thinking` blocks.
+  So glm/gpt's intermediate reasoning lands in the CLI rollout transcript alongside each
+  assistant turn — analyzable, not dropped.
 
-Tools (`--tools`): our in-process Serper/Jina/Exa MCP tools (real keys, as-of guarded) PLUS
-the local Bash/Read/Edit/Write CLI tools. Anthropic's built-in WebSearch/WebFetch are
-disallowed (they don't execute off-Claude). as-of is enforced at the tool boundary
-(FUTURECAST_AS_OF) using the per-question cutoff (target date - 1 day).
+Tools (`--tools`): our in-process Serper/Jina/Exa MCP tools (real keys, as-of guarded) plus a
+  representative slice of the official agent loop (Read/Glob/Grep/Edit/Write/Bash/Agent/Task/Skill);
+  host-harness noise and Anthropic's off-Claude WebSearch/WebFetch are disallowed (see tools_mcp).
+  as-of is enforced at the tool boundary (FUTURECAST_AS_OF) using the per-question cutoff.
 
-The question's OWN answer contract governs output (`\boxed{number}`); we do not impose a second
-format. The final number is extracted lightly from the box; the reasoning/process is the rollout.
+Output: the question's OWN answer contract governs output (`\boxed{...}`); we do not impose a
+  second format. The final answer is extracted lightly from the box; the process is the rollout.
 
-Usage:
+Usage (prefer the run.sh entry point, which also starts the adapter):
   .venv/bin/python agent_sdk/run_forecast.py [--model glm-5|gpt-5.5] [--tools]
-      [--question-file tasks/sample_futureworld_0624_30.jsonl] [--task-index 0]
+      [--question-file tasks/<file>.jsonl] [--task-index 0]
 """
 from __future__ import annotations
 
@@ -143,12 +143,12 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
 
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
-        model="claude-sonnet-4-5",                 # ccr Router overrides -> chosen gateway model
+        model="claude-sonnet-4-5",                 # dummy; adapter routes to FUTURECAST_MODEL
         permission_mode="bypassPermissions",
         mcp_servers=mcp_servers,
         allowed_tools=allowed,
         disallowed_tools=disallowed,
-        thinking={"type": "enabled", "budget_tokens": 4000},  # -> ccr -> upstream reasoning.effort
+        thinking={"type": "enabled", "budget_tokens": 4000},  # -> adapter -> upstream reasoning.effort
         max_turns=14 if use_tools else 3,
         cwd=str(CWD),
         env=env,

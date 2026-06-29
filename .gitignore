@@ -5,6 +5,5 @@ __pycache__/
 experiments/**/notes/
 *.egg-info/
 .pytest_cache/
-agent_sdk/claude-code-router/
-agent_sdk/ccr_home/
+agent_sdk/cli_home/
 log/
