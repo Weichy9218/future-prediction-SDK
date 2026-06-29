@@ -75,20 +75,35 @@ def guarded_fetch(
 # model only *identifies* offending spans verbatim — the removal is applied deterministically by
 # the caller — so a screening model can never summarize, truncate, or otherwise corrupt the
 # in-boundary content it is supposed to protect.
-_SCREEN_PROMPT = (
+#
+# Two strictness regimes (the caller picks via `strict`):
+#   - loose (default): we forecast FUTURE questions with no realized answer to leak, so only remove
+#     CLEAR post-cutoff/target leaks and keep all <=cutoff / historical / undated data. This avoids
+#     the false-positives that otherwise strip the very anchor the agent needs.
+#   - strict: also flag anything ambiguous (for historical backtests, where one leak is fatal).
+_SCREEN_PROMPT_HEAD = (
     "You are an as-of screening filter standing between a web tool and a forecasting agent. The "
     "agent may use ONLY information available on or before the cutoff date {cutoff}. The forecast "
     "target date is {target}; the realized value or outcome AT or AFTER the target date must never "
     "reach the agent (the benchmark answer would leak).\n\n"
     "From the web content below, find every span (one line or a short phrase, copied VERBATIM from "
     "the content) that:\n"
-    "  - states a value, price, level, result, ranking, or outcome dated AFTER {cutoff} — including "
-    "relative phrasing such as 'today', 'currently', 'latest', 'as of <post-cutoff date>', or 'at "
-    "close <target date>'; OR\n"
+    "  - states a value, price, level, result, ranking, or outcome whose own date is strictly AFTER "
+    "{cutoff} — including relative phrasing that clearly refers to after the cutoff ('today', 'as of "
+    "<post-cutoff date>', 'at close <target date>'); OR\n"
     "  - reveals what happens / the realized value AT the target date {target}.\n"
-    "Do NOT flag facts dated on or before {cutoff} — those are allowed and MUST be preserved. When "
-    "unsure whether a span is post-cutoff, flag it (false positives are cheaper than a leak).\n\n"
-    "Return STRICT JSON ONLY, no prose: {{\"leaks\": [\"<verbatim span>\", ...]}}. Use an empty "
+)
+_SCREEN_PROMPT_LOOSE = (
+    "PRESERVE everything else — all values dated on/before {cutoff}, all historical series, and any "
+    "undated figures (the agent needs these as its prior). Do NOT flag a span merely because it is "
+    "recent, undated, or a forecast/projection. Only remove CLEAR post-cutoff or target-date leaks.\n"
+)
+_SCREEN_PROMPT_STRICT = (
+    "Do NOT flag facts clearly dated on/before {cutoff}. When genuinely UNSURE whether a span is "
+    "post-cutoff, flag it (for this run a leak is fatal, so false positives are acceptable).\n"
+)
+_SCREEN_PROMPT_TAIL = (
+    "\nReturn STRICT JSON ONLY, no prose: {{\"leaks\": [\"<verbatim span>\", ...]}}. Use an empty "
     "list if nothing leaks. Each span MUST be copied exactly so it can be located and removed.\n\n"
     "=== CONTENT ===\n{content}"
 )
@@ -112,17 +127,20 @@ def _parse_leak_spans(raw: str) -> List[str]:
 
 
 async def screen_leaks(content: str, cutoff: Optional[str], target: Optional[str],
-                       chat: ScreenChat) -> List[str]:
+                       chat: ScreenChat, strict: bool = False) -> List[str]:
     """Ask the injected screening model which verbatim spans of `content` leak post-cutoff info.
 
-    Returns only spans that are actually present in `content` (the model may paraphrase; we keep
-    application deterministic). Fail-open to [] on any error — the deterministic regex guard is the
-    floor, this is the extra semantic layer on top.
+    `strict=False` (default) only removes clear post-cutoff/target leaks and preserves all
+    <=cutoff/undated data; `strict=True` also flags ambiguous spans (historical-backtest safety).
+    Returns only spans actually present in `content` (the model may paraphrase; we keep application
+    deterministic). Fail-open to [] on any error — the regex guard is the floor, this is the extra
+    semantic layer on top.
     """
     if not content or not content.strip() or not (cutoff or target):
         return []
-    prompt = _SCREEN_PROMPT.format(cutoff=cutoff or "(none)", target=target or "(none)",
-                                   content=content)
+    regime = _SCREEN_PROMPT_STRICT if strict else _SCREEN_PROMPT_LOOSE
+    prompt = (_SCREEN_PROMPT_HEAD + regime + _SCREEN_PROMPT_TAIL).format(
+        cutoff=cutoff or "(none)", target=target or "(none)", content=content)
     try:
         resp = await chat([{"role": "user", "content": prompt}])
         raw = (getattr(resp, "content", "") or "").strip()
@@ -133,9 +151,9 @@ async def screen_leaks(content: str, cutoff: Optional[str], target: Optional[str
 
 
 async def screen_and_redact(content: str, cutoff: Optional[str], target: Optional[str],
-                            chat: ScreenChat) -> tuple[str, int]:
+                            chat: ScreenChat, strict: bool = False) -> tuple[str, int]:
     """Run the screener and deterministically excise the spans it flags. Returns (text, n_redacted)."""
-    spans = await screen_leaks(content, cutoff, target, chat)
+    spans = await screen_leaks(content, cutoff, target, chat, strict=strict)
     redacted = content
     for span in spans:
         redacted = redacted.replace(span, REDACTION_MARKER)

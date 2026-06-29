@@ -32,8 +32,11 @@ set -a; [ -f "$ROOT/.env" ] && source "$ROOT/.env"; set +a
 unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY no_proxy || true
 
 # Start our owned adapter for the chosen model; kill any prior instance on the port.
-export FUTURECAST_MODEL="$MODEL"
-export FUTURECAST_REASONING_EFFORT="${FUTURECAST_REASONING_EFFORT:-high}"  # adapter reads at boot
+# Run parameters live in agent_sdk/config.py (one default each), overridable by env vars — set any
+# before this script and both the adapter and the runner pick them up, e.g.:
+#   FUTURECAST_REASONING_EFFORT=medium FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN=off \
+#       bash agent_sdk/run.sh --model gpt-5.5 --tools --question-file ... --task-index 0
+export FUTURECAST_MODEL="$MODEL"         # routing knob (config reads FUTURECAST_*; defaults in config.py)
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
 "$ROOT/.venv/bin/python" "$HERE/llm_adapter.py" >"$ROOT/log/adapter.stdout.log" 2>&1 &
 ADAPTER_PID=$!

@@ -37,8 +37,9 @@ EXA_URL = "https://api.exa.ai/search"
 
 # Content budgets (chars). We do NOT blind-truncate (Claude-Code-style): small pages return
 # whole; large pages are reduced by relevance windowing, then an optional cheap-LLM extraction.
-RETURN_BUDGET = 30000        # return a page untouched up to this size
-EXTRACT_INPUT_CAP = 45000    # max chars fed to the extractor (window first if larger)
+# Tunable via config (FUTURECAST_RETURN_BUDGET / _EXTRACT_INPUT_CAP); see agent_sdk/config.py.
+RETURN_BUDGET = int(os.environ.get("FUTURECAST_RETURN_BUDGET") or 30000)        # return a page untouched up to this size
+EXTRACT_INPUT_CAP = int(os.environ.get("FUTURECAST_EXTRACT_INPUT_CAP") or 45000)  # max chars fed to the extractor (window first if larger)
 
 
 # --------------------------------------------------------------------------------------
@@ -331,16 +332,20 @@ def _get_screener():
 async def _apply_screen(content: str) -> tuple[str, int]:
     """Pass `content` through the dedicated as-of screening model before it reaches the agent.
 
-    Returns (possibly-redacted content, n_spans_removed). No-op when the run is unguarded or the
-    screener is unavailable — the deterministic regex guard already ran and remains the floor.
+    Strictness is set by FUTURECAST_ASOF_SCREEN (config.py): `off` skips the model screener (the
+    deterministic regex guard remains the floor); `loose` (default for future-only questions) only
+    removes clear post-cutoff/target leaks and preserves all <=cutoff/undated data; `strict`
+    additionally flags anything ambiguous (use for historical backtests where a leak is fatal).
+    Returns (possibly-redacted content, n_spans_removed).
     """
+    mode = (os.environ.get("FUTURECAST_ASOF_SCREEN") or "loose").strip().lower()
     cutoff, target = _cutoff(), _target()
-    if not (cutoff or target):
+    if mode == "off" or not (cutoff or target):
         return content, 0
     client = _get_screener()
     if client is None:
         return content, 0
-    return await screen_and_redact(content, cutoff, target, client.chat)
+    return await screen_and_redact(content, cutoff, target, client.chat, strict=(mode == "strict"))
 
 
 

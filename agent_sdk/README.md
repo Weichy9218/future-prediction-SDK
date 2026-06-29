@@ -8,6 +8,7 @@ agent_sdk/
   llm_adapter.py   # OUR Anthropic /v1/messages endpoint, backed by futurecast/llm
   tools_mcp.py     # Serper/Jina/Exa MCP tools + as-of guard (regex + dedicated screening model)
   run_forecast.py  # Agent-SDK runner: load a question, pick playbook, capture thinking, write log/
+  config.py        # one typed surface for all run params (defaults <- env FUTURECAST_* <- CLI)
   run.sh           # fixed entry: start the adapter, run the agent
   cli_home/        # the claude CLI's HOME (config/state + transcripts land here)   [gitignore]
 ```
@@ -45,7 +46,13 @@ bash agent_sdk/run.sh --model gpt-5.5 --tools \                           # one 
 `run.sh` starts the adapter on :3456, sets `HOME=cli_home`, unsets proxies (gateways are reached
 directly), then runs `run_forecast.py`. The runner loads a question from `tasks/`, picks the
 type-matched playbook (A numeric / B event), enforces the per-question as-of at the tool boundary,
-and writes `log/<group>/<task>-<model>[-tools]/{rollout.jsonl, result.json}`.
+and writes `log/<group>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default group
+`futureworld-0629`).
+
+**Run parameters** live in `config.py` (one default each), overridable by env then CLI:
+`FUTURECAST_MODEL/REASONING_EFFORT/MAX_TOKENS/MAX_TURNS/THINKING_BUDGET/RUN_GROUP/ASOF_SCREEN/…`.
+The resolved set is logged as a `config:` line at run start and saved into `result.json`. Sweep by
+setting env, e.g. `FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN=off bash agent_sdk/run.sh …`.
 
 ## Tools (`tools_mcp.py`)
 - `web_search` (Serper, paginated + dedup, as-of guarded), `read_webpage` (Jina reader — **no blind

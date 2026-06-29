@@ -34,7 +34,9 @@ from starlette.routing import Route
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for sibling `config`
 from futurecast.llm import GPTSub2APIClient, OpenRouterNewAPIClient  # noqa: E402
+from config import from_env  # noqa: E402  sibling module: typed run parameters
 
 _LOG = _REPO_ROOT / "log" / "adapter.log"
 
@@ -52,19 +54,19 @@ def _log(msg: str) -> None:
 # client factory (one per process; model fixed by env for the run)
 # --------------------------------------------------------------------------------------
 def _build_client():
-    model = (os.environ.get("FUTURECAST_MODEL") or "glm-5").strip()
-    effort = os.environ.get("FUTURECAST_REASONING_EFFORT", "medium")
+    cfg = from_env()
+    model, effort, max_tokens = cfg.model.strip(), cfg.reasoning_effort, cfg.max_tokens
     if model.startswith("gpt"):
         return model, GPTSub2APIClient(
             model=model, api_key_env="GPT_sub2api_apikey", base_url_env="GPT_sub2api_URL",
-            reasoning_effort=effort, async_mode=True, max_tokens=8192)
+            reasoning_effort=effort, async_mode=True, max_tokens=max_tokens)
     # glm / qwen / deepseek via apihy chat-completions
     key_env = {"glm": "apihy_API_KEY_glm", "qwen": "apihy_API_KEY_qwen",
                "kimi": "apihy_API_KEY_kimi", "deepseek": "apihy_API_KEY_deepseek"}
     api_key_env = next((v for k, v in key_env.items() if model.startswith(k)), "apihy_API_KEY_glm")
     return model, OpenRouterNewAPIClient(
         model=model, api_key_env=api_key_env, base_url_env="apihy_BASE_URL",
-        reasoning_effort=effort, async_mode=True, max_tokens=8192)
+        reasoning_effort=effort, async_mode=True, max_tokens=max_tokens)
 
 
 _MODEL_NAME, _CLIENT = _build_client()

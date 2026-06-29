@@ -47,6 +47,7 @@ sys.path.insert(0, str(HERE))   # tools_mcp
 sys.path.insert(0, str(CWD))    # futurecast package
 
 from futurecast.data.loader import load_questions  # noqa: E402
+from config import from_env, export_env, config_summary  # noqa: E402  sibling: typed run parameters
 
 PLAYBOOK_DIR = CWD / "futurecast/playbook"
 DEFAULT_QFILE = "tasks/sample_futureworld_0624_30.jsonl"
@@ -111,7 +112,8 @@ def _extract_boxed(text: str) -> str | None:
     return matches[-1].strip() if matches else None
 
 
-async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None:
+async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
+    export_env(cfg)   # make the resolved config the source of truth for in-process tools + the adapter
     questions = load_questions(CWD / qfile if not os.path.isabs(qfile) else qfile)
     if not questions:
         raise SystemExit(f"no questions in {qfile}")
@@ -148,15 +150,16 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
         mcp_servers=mcp_servers,
         allowed_tools=allowed,
         disallowed_tools=disallowed,
-        thinking={"type": "enabled", "budget_tokens": 4000},  # -> adapter -> upstream reasoning.effort
-        max_turns=14 if use_tools else 3,
+        thinking={"type": "enabled", "budget_tokens": cfg.thinking_budget},  # -> adapter -> reasoning.effort
+        max_turns=cfg.max_turns if use_tools else 3,
         cwd=str(CWD),
         env=env,
         setting_sources=[],
     )
 
-    print(f"# routing: Agent SDK -> {ROUTER} -> {model} | tools={use_tools} | "
-          f"task={q.task_id} as_of={as_of} target={q.target_date}\n", flush=True)
+    print(f"# routing: Agent SDK -> {ROUTER} -> {cfg.model} | tools={use_tools} | "
+          f"task={q.task_id} as_of={as_of} target={q.target_date}\n# config: {config_summary(cfg)}\n",
+          flush=True)
     final_text, thinking_text, session_id, result, n_tool, n_think = "", "", None, None, 0, 0
     async for msg in query(prompt=q.task_question, options=options):
         if isinstance(msg, AssistantMessage):
@@ -182,9 +185,8 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
         print("total_cost_usd:", getattr(result, "total_cost_usd", None))
 
     # --- standardized, trajectory-first log output -------------------------------------
-    short = _MODEL_SHORT.get(model, model.replace(".", "").replace("-", ""))
-    run_group = f"futureworld_{(q.target_date or 'NA')}"
-    out_dir = CWD / "log" / run_group / f"{q.task_id}-{short}{'-tools' if use_tools else ''}"
+    short = _MODEL_SHORT.get(cfg.model, cfg.model.replace(".", "").replace("-", ""))
+    out_dir = CWD / "log" / cfg.run_group / f"{q.task_id}-{short}{'-tools' if use_tools else ''}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     proj = Path.home() / ".claude/projects" / project_key_for_directory(str(CWD))
@@ -196,8 +198,8 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
         shutil.copy(transcript, out_dir / "rollout.jsonl")
 
     result_json = {
-        "task_id": q.task_id, "model": model, "as_of": as_of, "target_date": q.target_date,
-        "forecast_type": q.forecast_type, "tools": use_tools,
+        "task_id": q.task_id, "model": cfg.model, "as_of": as_of, "target_date": q.target_date,
+        "forecast_type": q.forecast_type, "tools": use_tools, "config": config_summary(cfg),
         "tool_use_count": n_tool, "thinking_blocks": n_think, "session_id": session_id,
         "answer": _extract_boxed(final_text),         # the one final answer (benchmark contract)
         "reasoning_summary": thinking_text.strip(),    # the captured thinking (process/why)
@@ -211,9 +213,17 @@ async def main(model: str, use_tools: bool, qfile: str, task_index: int) -> None
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="glm-5")
+    # --model is the routing knob; the rest default from env (config.from_env) and are
+    # overridden here only when explicitly passed (default=None below).
+    ap.add_argument("--model", default=None)
     ap.add_argument("--tools", action="store_true")
     ap.add_argument("--question-file", default=DEFAULT_QFILE)
     ap.add_argument("--task-index", type=int, default=0)
+    ap.add_argument("--max-turns", type=int, default=None, help="agent turns when --tools")
+    ap.add_argument("--run-group", default=None, help="output dir log/<run_group>/...")
+    ap.add_argument("--asof-screen", choices=["off", "loose", "strict"], default=None,
+                    help="tool-boundary as-of screening strictness")
     a = ap.parse_args()
-    anyio.run(main, a.model, a.tools, a.question_file, a.task_index)
+    cfg = from_env(model=a.model, max_turns=a.max_turns, run_group=a.run_group,
+                   asof_screen=a.asof_screen)
+    anyio.run(main, cfg, a.tools, a.question_file, a.task_index)

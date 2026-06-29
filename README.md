@@ -88,8 +88,33 @@ bash agent_sdk/run.sh --model gpt-5.5 --tools \
 ```
 - run.sh 启动 adapter(:3456)、设 `HOME=agent_sdk/cli_home`（claude CLI 写 transcript 处）、unset 代理。
 - 模型：apihy=`glm-5`/`glm-5.1`/`qwen3-235b…`/`deepseek-v4-flash`；haoxiang=`gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`。
-- 推理强度默认 `high`，可 `FUTURECAST_REASONING_EFFORT=medium bash agent_sdk/run.sh …` 覆盖。
 - 题型**自动分派**：数值题→playbook A，事件/选择/二元题→playbook B（`run_forecast.build_system_prompt`）。
+- 输出默认落 `log/futureworld-0629/`（`run_group` 默认值）。
+
+### 参数管理（`agent_sdk/config.py`）
+所有运行参数有**唯一一处默认**（`config.py`），优先级：**默认 ← 环境变量 ← CLI 显式参数**。env 是
+跨进程真源（runner 与独立的 adapter 进程都读同一组 `FUTURECAST_*`），每次跑的 `config:` 行会记进
+rollout 头部，可复现。要做 sweep 就设环境变量：
+
+| 参数 | env | 默认 | 作用 |
+|---|---|---|---|
+| `model` | `FUTURECAST_MODEL`（或 `--model`） | `glm-5` | 网关模型路由 |
+| `reasoning_effort` | `FUTURECAST_REASONING_EFFORT` | `high` | low/medium/high |
+| `max_tokens` | `FUTURECAST_MAX_TOKENS` | `8192` | 单回合 completion 上限 |
+| `max_turns` | `FUTURECAST_MAX_TURNS`（或 `--max-turns`） | `14` | 带工具时的 agent 回合上限 |
+| `thinking_budget` | `FUTURECAST_THINKING_BUDGET` | `4000` | extended-thinking token 预算 |
+| `run_group` | `FUTURECAST_RUN_GROUP`（或 `--run-group`） | `futureworld-0629` | 输出目录 `log/<run_group>/` |
+| `asof_screen` | `FUTURECAST_ASOF_SCREEN`（或 `--asof-screen`） | `loose` | 工具边界 as-of 强度：`off`/`loose`/`strict` |
+| `return_budget` | `FUTURECAST_RETURN_BUDGET` | `30000` | read_webpage 整页返回上限（字符） |
+
+```bash
+# 例：medium 推理 + 8 回合上限 + 关闭语义筛选（纯未来题、最省）
+FUTURECAST_REASONING_EFFORT=medium FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN=off \
+    bash agent_sdk/run.sh --model gpt-5.5 --tools --question-file tasks/<file>.jsonl --task-index 0
+```
+**as-of 强度**：默认 `loose`——只删*明确*晚于 cutoff / 透露目标日的内容，保留所有 ≤cutoff/无日期数据
+（未来题无可泄漏答案，避免误删先验锚点）。历史回测改 `strict`（拿不准也删，防泄漏）；完全信任题面可 `off`（仅留确定性 regex 兜底）。
+
 
 **看结果（标准化布局）：**
 ```
@@ -108,7 +133,7 @@ log/adapter.log     # 每次请求的 tools=N + [tool-surface] 工具名单 + bl
 
 ```
 agent_sdk/                # 自有运行底座（租来的 agent 在这里跑）—— 见 agent_sdk/README.md
-  llm_adapter.py  tools_mcp.py  run_forecast.py  run.sh  cli_home/[gitignore]
+  llm_adapter.py  tools_mcp.py  run_forecast.py  run.sh  config.py  cli_home/[gitignore]
 futurecast/               # 预测控制层（只控制 agent 之外）
   playbook/   # 件#prompt：A 数值 / B 事件（先验+校准），无 Python 状态机
   guard/      # 件#hook：as_of 工具边界拦截（regex + 专职筛选模型）
