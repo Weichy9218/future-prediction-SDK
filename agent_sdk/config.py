@@ -16,11 +16,16 @@ To sweep a parameter, set its env var — e.g.:
 from __future__ import annotations
 
 import os
-from datetime import date
 from dataclasses import dataclass, fields, replace
+from datetime import date, datetime
 
-# All new runs land here unless overridden (FUTURECAST_RUN_GROUP).
-DEFAULT_RUN_GROUP = "futureworld-0629"
+RUN_GROUP_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
+
+
+def default_run_group() -> str:
+    """Generate the default output group at run start."""
+    return datetime.now().strftime(RUN_GROUP_TIMESTAMP_FORMAT)
+
 
 # field name -> env var that overrides it
 ENV = {
@@ -50,7 +55,7 @@ class RunConfig:
     # --- agent loop (read by the runner process) ---
     max_turns: int = 50                  # agent turns when --tools (knowledge-only is capped at 3)
     thinking_budget: int = 8000          # Anthropic extended-thinking budget_tokens
-    run_group: str = DEFAULT_RUN_GROUP   # output dir: log/<run_group>/<task>-<model>[-tools]/
+    run_group: str = ""                  # output dir: log/<run_group>/<backend>/<task>-<model>[-tools]/
     run_date: str = ""                   # defaults to local YYYY-MM-DD at run start
     as_of_override: str = ""             # explicit tool cutoff; normally blank
 
@@ -82,6 +87,8 @@ def from_env(**cli_overrides) -> RunConfig:
         env_vals[f.name] = int(raw) if isinstance(cur, int) else raw
     cfg = replace(base, **env_vals)
     cfg = replace(cfg, **{k: v for k, v in cli_overrides.items() if v is not None})
+    if not cfg.run_group:
+        cfg = replace(cfg, run_group=default_run_group())
     if not cfg.run_date:
         cfg = replace(cfg, run_date=date.today().isoformat())
     return cfg

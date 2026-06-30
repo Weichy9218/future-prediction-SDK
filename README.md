@@ -1,6 +1,6 @@
 # futurecast
 
-> **租用一个标准通用 agent（Claude Agent SDK / claude CLI）来解未来预测题——只控制 agent *之外* 的
+> **租用标准通用 agent loop（Claude Agent SDK / claude CLI 或 Codex CLI）来解未来预测题——只控制 agent *之外* 的
 > 东西：模型路由、工具、prompt、tool-边界 hook、可打分输出、经验库。绝不重建 agent loop。**
 
 它是 `galaxy-selfevolve` 的 clean-room 继任者。前身的病根：把"模型能不能预测"的认知**外化成 Python
@@ -18,23 +18,23 @@
 ## 架构：租 / 自有 / harvest
 
 ```
-            ┌──────────────── 租 (rent, 原样不动) ────────────────┐
-问题 ─playbook─►  Claude Agent SDK → claude CLI  [context·plan·memory·loop]  ─► \boxed{答案}
- (prompt)          │  ANTHROPIC_BASE_URL=127.0.0.1:3456                          │
-                   ▼                                                             ▼
-       ┌─ 自有 harness (own) ──────────────────────────────┐            可打分输出 → 打分
-       │ client  llm_adapter.py → futurecast/llm (gpt/glm) │          (verl-tool-future)
-       │ tool    tools_mcp.py  (Serper/Jina/Exa, in-proc MCP)│
-       │ prompt  playbook/ + runner 组装的 system prompt     │
-       │ hook    guard/as_of  (工具边界: regex + 专职筛选模型)│
-       └────────────────────────────────────────────────────┘
+            ┌────────────── 租 (rent, 原样不动) ──────────────┐
+问题 ─playbook─►  Claude Agent SDK / claude CLI  或  Codex CLI  ─► \boxed{答案}
+ (prompt)          │                  [agent loop]                  │
+                   ▼                                                ▼
+       ┌─ 自有 harness (own) ─────────────────────────┐     可打分输出 → 打分
+       │ client  llm_adapter.py → futurecast/llm       │   (verl-tool-future)
+       │ tool    tools_mcp.py 或 Codex native search   │
+       │ prompt  playbook/ + runner 组装的 system prompt│
+       │ hook    guard/as_of  (Claude MCP 工具边界过滤)│
+       └───────────────────────────────────────────────┘
 ```
 
 三类所有权，分清楚才不会越界：
 
 | 类别 | 是什么 | 在哪 |
 |---|---|---|
-| **租 (rent)** | agent loop 的 **harness**：上下文管理、规划、记忆、循环本身。**不重建、不改。** | Claude Agent SDK / claude CLI |
+| **租 (rent)** | agent loop 的 **harness**：上下文管理、规划、记忆、循环本身。**不重建、不改。** | Claude Agent SDK / claude CLI；Codex CLI |
 | **自有 (own)** | 我们**自行提供**给租来的 loop 的四件 harness：**client / tool / prompt / hook**（见下） | `agent_sdk/` + `futurecast/playbook,guard` |
 | **harvest** | **拿来主义**：把别处已验证的*通用*基础设施**整段拷进来**复用，而不是重写——它是管线，不是"agent" | `futurecast/llm`（源自 core/llm）、打分/出题（源自 verl-tool-future） |
 
@@ -57,9 +57,10 @@
   （`Read/Glob/Grep/Edit/Write/Bash/Agent/Task/Skill` + 3 个 MCP），剔除宿主 harness 杂项。
 - **prompt** = `futurecast/playbook/`（A 数值 / B 事件）+ runner 按题型组装的 system prompt + as-of
   vantage 重构。**预测认知只在这里。**
-- **hook** = `futurecast/guard/as_of.py` 在**工具边界**的拦截（我们对租来 loop 的唯一"插桩"）：
+- **hook** = `futurecast/guard/as_of.py` 在 Claude/Futurecast MCP **工具边界**的拦截（我们对租来 loop 的唯一"插桩"）：
   ① 确定性 regex（检索日期上限 + 目标日/cutoff 后脱敏）；② **专职筛选模型**（qwen3-next-80b）逐字
-  指认残余泄漏 span，由我们确定性删除。main agent **永远看不到 cutoff 之后的信息**。
+  指认残余泄漏 span，由我们确定性删除。Claude backend 的 main agent **永远看不到 cutoff 之后的信息**；
+  Codex backend 当前用原生 search，靠 prompt/source 选择约束 as-of，尚未接入这层机械过滤。
 
 ### 3) 预测任务的 insight（方法论）
 **预测 ≠ 检索。** 未来值**搜不到**（尚未发生）；能搜到的是**先验**和几个**因子**。轨迹必须能看出
@@ -80,16 +81,21 @@
 ```bash
 cd /Users/weichy/Desktop/Doing-Right-Things/FutureX/papers/futurecast
 
-# 跑某个基准文件里的第 N 题（--tools 开多步检索 rollout；--model 选网关模型）
-bash agent_sdk/run.sh --model glm-5  --tools \
+# 跑某个基准文件里的第 N 题（默认 Claude Code backend；--tools 开多步检索 rollout；--model 选网关模型）
+bash agent_sdk/run.sh --backend claude_code --model glm-5  --tools \
     --question-file tasks/2026-07-06_2026-07-06_futureworld_futurex_UTC+8__question.jsonl --task-index 0
-bash agent_sdk/run.sh --model gpt-5.5 --tools \
+bash agent_sdk/run.sh --backend claude_code --model gpt-5.5 --tools \
+    --question-file tasks/2026-07-06_2026-07-06_futureworld_futurex_UTC+8__question.jsonl --task-index 0
+
+# 切到 Codex backend（同一题面/同一 playbook/result schema；raw rollout 是 Codex JSONL event stream）
+bash agent_sdk/run.sh --backend codex --model gpt-5.5 --tools \
     --question-file tasks/2026-07-06_2026-07-06_futureworld_futurex_UTC+8__question.jsonl --task-index 0
 ```
-- run.sh 启动 adapter(:3456)、设 `HOME=agent_sdk/cli_home`（claude CLI 写 transcript 处）、unset 代理。
+- `--backend claude_code` 启动 adapter(:3456)、设 `HOME=agent_sdk/cli_home`（claude CLI 写 transcript 处）、unset 代理。
+- `--backend codex` 调用 `codex exec --json`，使用同一个 gpt-5.5/Sub2API gateway；`--tools` 使用 Codex 原生 web search。
 - 模型：apihy=`glm-5`/`glm-5.1`/`qwen3-235b…`/`deepseek-v4-flash`；haoxiang=`gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`。
 - 题型**自动分派**：数值题→playbook A，事件/选择/二元题→playbook B（`run_forecast.build_system_prompt`）。
-- 输出默认落 `log/futureworld-0629/`（`run_group` 默认值）。
+- 输出默认落 `log/YYYYMMDD-HHMMSS/`（`run_group` 默认为运行开始 timestamp）。
 - 工具边界使用 `effective_as_of = min(target_date - 1 day, run_date)`；历史回测或手工复现可用
   `FUTURECAST_AS_OF` / `--as-of` 显式覆盖。
 
@@ -105,7 +111,7 @@ rollout 头部，可复现。要做 sweep 就设环境变量：
 | `max_tokens` | `FUTURECAST_MAX_TOKENS` | `8192` | 单回合 completion 上限 |
 | `max_turns` | `FUTURECAST_MAX_TURNS`（或 `--max-turns`） | `50` | 带工具时的 agent 回合上限 |
 | `thinking_budget` | `FUTURECAST_THINKING_BUDGET` | `8000` | extended-thinking token 预算 |
-| `run_group` | `FUTURECAST_RUN_GROUP`（或 `--run-group`） | `futureworld-0629` | 输出目录 `log/<run_group>/` |
+| `run_group` | `FUTURECAST_RUN_GROUP`（或 `--run-group`） | 运行开始 timestamp（`YYYYMMDD-HHMMSS`） | 输出目录 `log/<run_group>/` |
 | `run_date` | `FUTURECAST_RUN_DATE`（或 `--run-date`） | 本地今天 | 本次 forecast 的实际日期，用来 cap desired cutoff |
 | `as_of_override` | `FUTURECAST_AS_OF`（或 `--as-of`） | 空 | 显式 effective cutoff；设置后跳过 `min(target-1, run_date)` |
 | `asof_screen` | `FUTURECAST_ASOF_SCREEN`（或 `--asof-screen`） | `loose` | 工具边界 as-of 强度：`off`/`loose`/`strict` |
@@ -125,13 +131,46 @@ FUTURECAST_REASONING_EFFORT=medium FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN
 
 **看结果（标准化布局）：**
 ```
-log/<run_group>/<task_id>-<model_short>[-tools]/
-    rollout.jsonl   # claude CLI 完整 transcript（thinking 在 content[*].type=="thinking"）
+log/<run_group>/<backend>/<task_id>-<model_short>[-tools]/
+    rollout.jsonl   # claude_code: claude CLI transcript；codex: codex exec --json event stream
     result.json     # {answer, target_date, desired_as_of, effective_as_of, run_date, reasoning_summary, …}
 log/adapter.log     # 每次请求的 tools=N + [tool-surface] 工具名单 + blocks（核对工具面/路由）
 ```
-快速核对一次跑得对不对：`result.json` 的 `thinking_blocks>0`（reasoning 进轨迹）、`answer` 非空、
-`rollout.jsonl` 里工具结果带 `span(s) screened`（as-of hook 在工作）。
+快速核对一次跑得对不对：`result.json` 的 `thinking_blocks>0`（reasoning 进轨迹）、`answer` 非空。
+Claude/Futurecast MCP 工具 run 还应在 `rollout.jsonl` 的工具结果里看到 blocked/redacted/screened 这类
+as-of guard 提示；Codex run 则看 `item.completed.item.type=="web_search"` 的 query/action。
+
+### Claude Code vs Codex 轨迹差异
+
+两种 backend 共享题面加载、playbook、`effective_as_of` 计算、`\boxed{}` 提取和 `result.json` schema；
+输出目录按 backend 分开，方便同一个 `run_group` 下横向比较：
+
+```
+log/<run_group>/claude_code/<task_id>-<model_short>[-tools]/
+log/<run_group>/codex/<task_id>-<model_short>[-tools]/
+```
+
+主要差异在 raw trajectory 和工具边界：
+
+| 维度 | `claude_code` backend | `codex` backend |
+|---|---|---|
+| loop | Claude Agent SDK / claude CLI | `codex exec --json` |
+| 模型路由 | 本地 `llm_adapter.py` 伪装 Anthropic `/v1/messages`，再转 `futurecast/llm` | Codex custom provider 直连 Sub2API Responses |
+| 工具 | Futurecast MCP：`web_search` / `read_webpage` / `exa_search` | Codex 原生 web search（当前未接入 Futurecast MCP/Jina/Serper） |
+| as-of 保护 | 工具结果进入上下文前由 Futurecast MCP regex + screening model 机械过滤 | prompt 约束 + 查询/source 选择约束；没有 Futurecast MCP 的机械 fetch guard |
+| `rollout.jsonl` 形态 | Claude transcript：`assistant.message.content[]` 里可见 `thinking` / `tool_use` / `text`，后续 `user.tool_result` 保存工具返回 | Codex event stream：`item.completed.item.type` 为 `agent_message` / `reasoning` / `web_search` |
+| 工具结果可见性 | 能看到具体 MCP tool args、tool result、as-of guard 提示（如 blocked/redacted/screened） | 能看到 Codex 搜索 query/action；搜索结果正文由 Codex event stream 抽象化，不等同于 MCP tool result |
+| `result.json` | `backend=claude_code`，`tool_use_count` 来自 Claude tool_use 数 | `backend=codex`，`tool_use_count` 来自完成的 Codex tool/search items |
+
+一个实测同题例子（Texas Attorney General Republican Primary Runoff，`gpt-5.5`，`effective_as_of=2026-05-25`）：
+- `claude_code` + Futurecast MCP tools：2 次工具调用（Serper search + Jina read_webpage），raw rollout 能看到
+  `mcp__futurecast__web_search`、`mcp__futurecast__read_webpage` 及 as-of guard 文本；结果为 `\boxed{B}`。
+- `codex` + 原生 search：2 次完成的 web search item，raw rollout 记录为 `item.completed`/`web_search`；
+  结果为 `\boxed{B, E}`，原因是它把 “Person B” 视作 Mayes Middleton 的重复选项一起选入。
+
+因此：要审计“工具到底返回了什么、as-of 是否机械过滤”，优先看 `claude_code` 轨迹；要测试 Codex
+agent loop 与同一 playbook/schema 的兼容性，看 `codex` 轨迹。后续如果需要严格同工具面对比，应把
+Futurecast MCP 也接进 Codex，而不是使用 Codex 原生 search。
 
 **打分**（题面有 ground_truth 时，例如历史回测）：经 `futurecast/io/scoring.py` 接
 `verl-tool-future`（`score_submission_file` + `rewards/brier.py`）。未来题暂无标签 → 只看轨迹质量。

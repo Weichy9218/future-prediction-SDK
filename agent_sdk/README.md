@@ -47,8 +47,8 @@ bash agent_sdk/run.sh --model gpt-5.5 --tools \                           # one 
 directly), then runs `run_forecast.py`. The runner loads a question from `tasks/`, picks the
 type-matched playbook (A numeric / B event), and enforces the effective as-of at the tool boundary:
 `min(target_date - 1 day, run_date)` unless `FUTURECAST_AS_OF` / `--as-of` explicitly overrides it.
-It writes `log/<group>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default group
-`futureworld-0629`).
+It writes `log/<group>/<backend>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default
+group is the run-start timestamp, `YYYYMMDD-HHMMSS`).
 
 **Run parameters** live in `config.py` (one default each), overridable by env then CLI:
 `FUTURECAST_MODEL/REASONING_EFFORT/MAX_TOKENS/MAX_TURNS/THINKING_BUDGET/RUN_GROUP/RUN_DATE/AS_OF/ASOF_SCREEN/…`.

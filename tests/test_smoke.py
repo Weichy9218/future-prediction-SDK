@@ -7,6 +7,7 @@ not here.
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +69,37 @@ def test_effective_as_of_caps_future_desired_cutoff():
     assert resolve_effective_as_of(desired, run_date="2026-06-30") == "2026-06-30"
     assert resolve_effective_as_of(desired, run_date="2026-07-10") == "2026-07-05"
     assert resolve_effective_as_of(desired, run_date="2026-06-30", override="2026-07-05") == "2026-07-05"
+
+
+def test_run_group_defaults_to_timestamp_and_can_be_overridden(monkeypatch):
+    import config
+
+    monkeypatch.delenv("FUTURECAST_RUN_GROUP", raising=False)
+    cfg = config.from_env(run_date="2026-06-30")
+    assert re.fullmatch(r"\d{8}-\d{6}", cfg.run_group)
+
+    monkeypatch.setenv("FUTURECAST_RUN_GROUP", "env-group")
+    assert config.from_env(run_date="2026-06-30").run_group == "env-group"
+    assert config.from_env(run_group="cli-group", run_date="2026-06-30").run_group == "cli-group"
+
+
+def test_codex_rollout_counts_completed_tool_items_only():
+    from codex.run_forecast import _collect_rollout
+
+    raw = "\n".join([
+        '{"type":"thread.started","thread_id":"t1"}',
+        '{"type":"item.started","item":{"type":"web_search","query":""}}',
+        '{"type":"item.completed","item":{"type":"web_search","query":"q"}}',
+        '{"type":"item.completed","item":{"type":"reasoning","text":"why"}}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"final \\\\boxed{B}"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":1}}',
+    ])
+    parsed = _collect_rollout(raw)
+    assert parsed["session_id"] == "t1"
+    assert parsed["tool_use_count"] == 1
+    assert parsed["thinking_blocks"] == 1
+    assert parsed["reasoning_summary"] == "why"
+    assert parsed["final_text"] == "final \\boxed{B}"
 
 
 def test_tool_budget_nudge_and_repeat_suppression(monkeypatch):

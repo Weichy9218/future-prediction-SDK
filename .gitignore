@@ -7,3 +7,6 @@ experiments/**/notes/
 .pytest_cache/
 agent_sdk/cli_home/
 log/
+.claude/
+tasks/external_data/
+agent_sdk/codex/cli_home/

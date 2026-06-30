@@ -16,16 +16,27 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 export HOME="$HERE/cli_home"             # claude CLI reads config/state + writes transcripts here
 PORT=3456
+mkdir -p "$ROOT/log" "$HOME"
 
-# Parse args: --model NAME selects the route; --tools (and others) are forwarded to the runner.
+# Parse args: --backend codex selects the Codex loop; otherwise this script uses Claude Code.
+BACKEND="claude_code"
 MODEL="glm-5"
 PASS_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --backend) BACKEND="$2"; shift 2 ;;
     --model) MODEL="$2"; PASS_ARGS+=("--model" "$2"); shift 2 ;;
     *) PASS_ARGS+=("$1"); shift ;;
   esac
 done
+
+case "$BACKEND" in
+  claude|claude_code) BACKEND="claude_code" ;;
+  codex)
+    exec "$HERE/run_codex.sh" --model "$MODEL" "${PASS_ARGS[@]}"
+    ;;
+  *) echo "unknown backend: $BACKEND (expected claude_code or codex)" >&2; exit 2 ;;
+esac
 
 # load repo keys, drop any socks/http proxy (gateways are reached directly)
 set -a; [ -f "$ROOT/.env" ] && source "$ROOT/.env"; set +a
@@ -39,6 +50,9 @@ unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY
 export FUTURECAST_MODEL="$MODEL"         # routing knob (config reads FUTURECAST_*; defaults in config.py)
 if [ -z "${FUTURECAST_RUN_DATE:-}" ]; then
   export FUTURECAST_RUN_DATE="$(date +%F)"
+fi
+if [ -z "${FUTURECAST_RUN_GROUP:-}" ]; then
+  export FUTURECAST_RUN_GROUP="$(date +%Y%m%d-%H%M%S)"
 fi
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
 "$ROOT/.venv/bin/python" "$HERE/llm_adapter.py" >"$ROOT/log/adapter.stdout.log" 2>&1 &

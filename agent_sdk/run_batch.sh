@@ -42,7 +42,10 @@ fi
 if [ -n "$AS_OF" ]; then
   export FUTURECAST_AS_OF="$AS_OF"
 fi
-RUN_GROUP="${FUTURECAST_RUN_GROUP:-futureworld-0629}"
+if [ -z "${FUTURECAST_RUN_GROUP:-}" ]; then
+  export FUTURECAST_RUN_GROUP="$(date +%Y%m%d-%H%M%S)"
+fi
+RUN_GROUP="$FUTURECAST_RUN_GROUP"
 BATCH_DIR="$ROOT/log/$RUN_GROUP/_batch"; mkdir -p "$BATCH_DIR"
 
 # --- one shared adapter for the whole batch -------------------------------------------------
