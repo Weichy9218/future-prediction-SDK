@@ -37,6 +37,9 @@ unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY
 #   FUTURECAST_REASONING_EFFORT=medium FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN=off \
 #       bash agent_sdk/run.sh --model gpt-5.5 --tools --question-file ... --task-index 0
 export FUTURECAST_MODEL="$MODEL"         # routing knob (config reads FUTURECAST_*; defaults in config.py)
+if [ -z "${FUTURECAST_RUN_DATE:-}" ]; then
+  export FUTURECAST_RUN_DATE="$(date +%F)"
+fi
 lsof -ti tcp:$PORT 2>/dev/null | xargs kill -9 2>/dev/null || true
 "$ROOT/.venv/bin/python" "$HERE/llm_adapter.py" >"$ROOT/log/adapter.stdout.log" 2>&1 &
 ADAPTER_PID=$!

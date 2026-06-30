@@ -5,6 +5,7 @@
 # benchmark file; single-question runs still use run.sh.
 #
 #   bash agent_sdk/run_batch.sh --model gpt-5.5 --question-file tasks/<file>.jsonl --n 100 --concurrency 5
+#   bash agent_sdk/run_batch.sh --run-date 2026-06-30 --as-of 2026-06-29 ...
 #
 # Per-worker stdout -> log/<run_group>/_batch/<idx>.log ; forecasts -> log/<run_group>/<task>-<model>-tools/.
 set -uo pipefail
@@ -15,7 +16,7 @@ PORT=3456
 
 MODEL="gpt-5.5"
 QFILE="tasks/2026-07-06_2026-07-06_futureworld_futurex_UTC+8__question.jsonl"
-N=100; CONC=5; START=0; INDICES=""
+N=100; CONC=5; START=0; INDICES=""; RUN_DATE=""; AS_OF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL="$2"; shift 2 ;;
@@ -24,6 +25,8 @@ while [ $# -gt 0 ]; do
     --concurrency) CONC="$2"; shift 2 ;;
     --start) START="$2"; shift 2 ;;
     --indices) INDICES="$2"; shift 2 ;;   # explicit space-separated list (overrides --start/--n)
+    --run-date) RUN_DATE="$2"; shift 2 ;;
+    --as-of) AS_OF="$2"; shift 2 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -31,6 +34,14 @@ done
 set -a; [ -f "$ROOT/.env" ] && source "$ROOT/.env"; set +a
 unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY no_proxy || true
 export FUTURECAST_MODEL="$MODEL"
+if [ -n "$RUN_DATE" ]; then
+  export FUTURECAST_RUN_DATE="$RUN_DATE"
+elif [ -z "${FUTURECAST_RUN_DATE:-}" ]; then
+  export FUTURECAST_RUN_DATE="$(date +%F)"
+fi
+if [ -n "$AS_OF" ]; then
+  export FUTURECAST_AS_OF="$AS_OF"
+fi
 RUN_GROUP="${FUTURECAST_RUN_GROUP:-futureworld-0629}"
 BATCH_DIR="$ROOT/log/$RUN_GROUP/_batch"; mkdir -p "$BATCH_DIR"
 
@@ -41,6 +52,7 @@ ADAPTER_PID=$!
 trap 'kill $ADAPTER_PID 2>/dev/null || true' EXIT
 for i in $(seq 1 40); do curl -s -m2 "http://127.0.0.1:$PORT/" -o /dev/null && break || sleep 0.5; done
 echo "# batch: model=$MODEL n=$N conc=$CONC start=$START qfile=$QFILE run_group=$RUN_GROUP"
+echo "# batch cutoff: run_date=$FUTURECAST_RUN_DATE as_of_override=${FUTURECAST_AS_OF:-}"
 echo "# adapter pid=$ADAPTER_PID; per-worker logs -> $BATCH_DIR/<idx>.log"
 
 # --- one worker = one question (own process, own as-of env), shared adapter -----------------
@@ -56,12 +68,19 @@ run_one() {
 export -f run_one; export ROOT HERE MODEL QFILE BATCH_DIR
 
 if [ -n "$INDICES" ]; then
-  printf '%s\n' $INDICES | xargs -P "$CONC" -I {} bash -c 'run_one "$@"' _ {}
+  INDEX_LIST="$(printf '%s\n' $INDICES)"
 else
-  seq "$START" "$((START + N - 1))" | xargs -P "$CONC" -I {} bash -c 'run_one "$@"' _ {}
+  INDEX_LIST="$(seq "$START" "$((START + N - 1))")"
 fi
+printf '%s\n' "$INDEX_LIST" | xargs -P "$CONC" -I {} bash -c 'run_one "$@"' _ {}
 
 # --- summary --------------------------------------------------------------------------------
-ok=$(grep -lh '' "$BATCH_DIR"/*.log 2>/dev/null | wc -l | tr -d ' ')
-answered=$(grep -rhoE '"answer": "?[^",]' "$ROOT/log/$RUN_GROUP"/*-tools/result.json 2>/dev/null | grep -cv 'null')
-echo "# batch done: $answered/$N produced a non-null answer (see $ROOT/log/$RUN_GROUP/)"
+total=0
+answered=0
+for idx in $INDEX_LIST; do
+  total=$((total + 1))
+  if grep -E 'answer: .+' "$BATCH_DIR/$idx.log" 2>/dev/null | grep -qv 'answer: None$'; then
+    answered=$((answered + 1))
+  fi
+done
+echo "# batch done: $answered/$total produced a non-null answer (see $ROOT/log/$RUN_GROUP/)"

@@ -4,7 +4,7 @@ Question files are JSONL with {task_id, task_question, task_description?}. The t
 embeds the target date and the answer-space instructions. We parse out:
   - forecast_type (number | binary choice | ... ) from the answer-format instructions
   - target_date   (the date being predicted)
-  - as_of         (the cutoff the forecaster may use = target_date - 1 day, by default)
+  - as_of         (the desired benchmark cutoff = target_date - 1 day, by default)
 
 Keep this generic — no per-series parsing here.
 """
@@ -38,6 +38,34 @@ class Question:
     task_description: str = ""
 
 
+def desired_as_of_from_target(target: Optional[str], offset_days: int = 1) -> Optional[str]:
+    """Return the benchmark's desired cutoff (`target - offset_days`) when a target is present."""
+    if not target:
+        return None
+    return (date.fromisoformat(target) - timedelta(days=offset_days)).isoformat()
+
+
+def resolve_effective_as_of(
+    desired_as_of: Optional[str],
+    run_date: str,
+    override: Optional[str] = None,
+) -> str:
+    """Resolve the cutoff actually used by tools.
+
+    Live forecasts cannot use evidence from a future desired cutoff. Without an explicit override,
+    cap the benchmark's desired cutoff by the date the run is made. Historical backtests can pass an
+    override to intentionally use the full desired cutoff.
+    """
+    if override:
+        date.fromisoformat(override)
+        return override
+    date.fromisoformat(run_date)
+    if not desired_as_of:
+        return run_date
+    desired = date.fromisoformat(desired_as_of)
+    return min(desired, date.fromisoformat(run_date)).isoformat()
+
+
 def _infer_type(q: str) -> str:
     """Classify the answer space so the runner can pick the numeric (A) vs event (B) playbook.
 
@@ -68,9 +96,7 @@ def load_questions(path: str | Path, as_of_offset_days: int = 1) -> list[Questio
         q = d["task_question"]
         m = _DATE_RE.search(q)
         target = m.group(1) if m else None
-        as_of = None
-        if target:
-            as_of = (date.fromisoformat(target) - timedelta(days=as_of_offset_days)).isoformat()
+        as_of = desired_as_of_from_target(target, as_of_offset_days)
         out.append(Question(
             task_id=d["task_id"], task_question=q, forecast_type=_infer_type(q),
             target_date=target, as_of=as_of, task_description=d.get("task_description", ""),

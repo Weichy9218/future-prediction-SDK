@@ -15,7 +15,8 @@ Reasoning capture (the trajectory must explain HOW/WHY the answer was produced):
 Tools (`--tools`): our in-process Serper/Jina/Exa MCP tools (real keys, as-of guarded) plus a
   representative slice of the official agent loop (Read/Glob/Grep/Edit/Write/Bash/Agent/Task/Skill);
   host-harness noise and Anthropic's off-Claude WebSearch/WebFetch are disallowed (see tools_mcp).
-  as-of is enforced at the tool boundary (FUTURECAST_AS_OF) using the per-question cutoff.
+  as-of is enforced at the tool boundary (FUTURECAST_AS_OF) using the effective cutoff:
+  min(target-1, run_date), unless explicitly overridden.
 
 Output: the question's OWN answer contract governs output (`\boxed{...}`); we do not impose a
   second format. The final answer is extracted lightly from the box; the process is the rollout.
@@ -23,6 +24,7 @@ Output: the question's OWN answer contract governs output (`\boxed{...}`); we do
 Usage (prefer the run.sh entry point, which also starts the adapter):
   .venv/bin/python agent_sdk/run_forecast.py [--model glm-5|gpt-5.5] [--tools]
       [--question-file tasks/<file>.jsonl] [--task-index 0]
+      [--run-date YYYY-MM-DD] [--as-of YYYY-MM-DD]
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ CWD = HERE.parent  # the futurecast repo root
 sys.path.insert(0, str(HERE))   # tools_mcp
 sys.path.insert(0, str(CWD))    # futurecast package
 
-from futurecast.data.loader import load_questions  # noqa: E402
+from futurecast.data.loader import load_questions, resolve_effective_as_of  # noqa: E402
 from config import from_env, export_env, config_summary  # noqa: E402  sibling: typed run parameters
 
 PLAYBOOK_DIR = CWD / "futurecast/playbook"
@@ -59,14 +61,20 @@ def _is_numeric(forecast_type: str) -> bool:
     return forecast_type == "number"
 
 
-def build_system_prompt(q) -> str:
+def build_system_prompt(q, effective_as_of: str, desired_as_of: str, run_date: str) -> str:
     """Assemble the system prompt: the type-appropriate playbook + tool/boundary + vantage frame.
 
     Playbook A (numeric series) and B (one-off events) encode different priors — a recent same-
     series value vs. a market/odds/base-rate — so the boundary and vantage text must match the
     type, otherwise an event question gets numeric-series instructions ('extrapolate the series').
     """
-    as_of, target = q.as_of or "", q.target_date or ""
+    as_of, target = effective_as_of, q.target_date or ""
+    desired_note = (
+        f"The benchmark desired cutoff is {desired_as_of}, but this live run date is {run_date}; "
+        f"the effective cutoff is therefore {effective_as_of}."
+        if desired_as_of and desired_as_of != effective_as_of
+        else f"The effective cutoff for this run is {effective_as_of}."
+    )
     if _is_numeric(q.forecast_type):
         playbook = (PLAYBOOK_DIR / "playbook_A_numeric.md").read_text(encoding="utf-8")
         boundary = (
@@ -101,6 +109,7 @@ def build_system_prompt(q) -> str:
         playbook
         + "\n\n## Tools & boundary\n" + boundary
         + "\n\n## Vantage point (hard rule)\n"
+        + desired_note + "\n"
         + f"Treat **{as_of}** as the current date ('today'). The target **{target}** has NOT "
         f"happened yet from your vantage point: " + vantage
     )
@@ -118,16 +127,16 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
     if not questions:
         raise SystemExit(f"no questions in {qfile}")
     q = questions[task_index]
-    as_of = q.as_of or ""
-    os.environ["FUTURECAST_AS_OF"] = as_of   # the as-of guard (tools_mcp) reads this
+    desired_as_of = q.as_of or ""
+    effective_as_of = resolve_effective_as_of(desired_as_of, cfg.run_date, cfg.as_of_override)
+    os.environ["FUTURECAST_AS_OF"] = effective_as_of   # the as-of guard (tools_mcp) reads this
     os.environ["FUTURECAST_TARGET"] = q.target_date or ""  # the date whose value must NOT leak
 
     # Per-question system prompt: type-appropriate playbook (A numeric / B event) + tool boundary
-    # + a vantage-point reframe. The benchmark's target dates can be in the *indexable past*
-    # relative to wall-clock, so a general agent will reason "this already happened, let me look up
-    # the realized value" and leak the answer (observed in trajectories). We reframe the vantage:
-    # treat the cutoff as 'today', making the target genuinely future + unknowable.
-    system_prompt = build_system_prompt(q)
+    # + a vantage-point reframe. The benchmark's desired cutoff can itself be in the future
+    # relative to the live run date, so the tool boundary uses effective_as_of =
+    # min(target-1, run_date) unless the operator explicitly overrides it.
+    system_prompt = build_system_prompt(q, effective_as_of, desired_as_of, cfg.run_date)
 
     env = dict(os.environ)
     env.update(
@@ -158,7 +167,9 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
     )
 
     print(f"# routing: Agent SDK -> {ROUTER} -> {cfg.model} | tools={use_tools} | "
-          f"task={q.task_id} as_of={as_of} target={q.target_date}\n# config: {config_summary(cfg)}\n",
+          f"task={q.task_id} target={q.target_date} desired_as_of={desired_as_of} "
+          f"effective_as_of={effective_as_of} run_date={cfg.run_date}\n"
+          f"# config: {config_summary(cfg)}\n",
           flush=True)
     final_text, thinking_text, session_id, result, n_tool, n_think = "", "", None, None, 0, 0
     run_error = None
@@ -206,7 +217,10 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
         shutil.copy(transcript, out_dir / "rollout.jsonl")
 
     result_json = {
-        "task_id": q.task_id, "model": cfg.model, "as_of": as_of, "target_date": q.target_date,
+        "task_id": q.task_id, "model": cfg.model, "as_of": effective_as_of,
+        "target_date": q.target_date, "desired_as_of": desired_as_of,
+        "effective_as_of": effective_as_of, "run_date": cfg.run_date,
+        "as_of_override": cfg.as_of_override or None,
         "forecast_type": q.forecast_type, "tools": use_tools, "config": config_summary(cfg),
         "tool_use_count": n_tool, "thinking_blocks": n_think, "session_id": session_id,
         "answer": _extract_boxed(final_text),         # the one final answer (benchmark contract)
@@ -230,9 +244,14 @@ if __name__ == "__main__":
     ap.add_argument("--task-index", type=int, default=0)
     ap.add_argument("--max-turns", type=int, default=None, help="agent turns when --tools")
     ap.add_argument("--run-group", default=None, help="output dir log/<run_group>/...")
+    ap.add_argument("--run-date", default=None,
+                    help="date the forecast is made; defaults to local today")
+    ap.add_argument("--as-of", dest="as_of_override", default=None,
+                    help="explicit effective cutoff; overrides min(target-1, run_date)")
     ap.add_argument("--asof-screen", choices=["off", "loose", "strict"], default=None,
                     help="tool-boundary as-of screening strictness")
     a = ap.parse_args()
     cfg = from_env(model=a.model, max_turns=a.max_turns, run_group=a.run_group,
+                   run_date=a.run_date, as_of_override=a.as_of_override,
                    asof_screen=a.asof_screen)
     anyio.run(main, cfg, a.tools, a.question_file, a.task_index)

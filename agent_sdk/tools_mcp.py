@@ -348,6 +348,72 @@ async def _apply_screen(content: str) -> tuple[str, int]:
     return await screen_and_redact(content, cutoff, target, client.chat, strict=(mode == "strict"))
 
 
+# --------------------------------------------------------------------------------------
+# tool-budget nudges (loop control only; no forecasting cognition)
+# --------------------------------------------------------------------------------------
+_TOOL_STATE = {"count": 0, "seen": []}
+
+
+def _tool_budget() -> int:
+    try:
+        return max(1, int(os.environ.get("FUTURECAST_MAX_TURNS") or 50))
+    except ValueError:
+        return 50
+
+
+def _normalize_request(text: str) -> set[str]:
+    norm = re.sub(r"[^\w一-鿿]+", " ", (text or "").lower())
+    return {tok for tok in norm.split() if tok}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def _same_page_scope(a: str, b: str) -> bool:
+    a_page = re.search(r"\bpage=(\d+)\b", a or "")
+    b_page = re.search(r"\bpage=(\d+)\b", b or "")
+    return (a_page.group(1) if a_page else None) == (b_page.group(1) if b_page else None)
+
+
+def _budget_note() -> str:
+    budget = _tool_budget()
+    count = int(_TOOL_STATE["count"])
+    half = max(1, (budget + 1) // 2)
+    urgent = max(1, (budget * 4 + 4) // 5)
+    if count >= urgent:
+        return (
+            f"\n\n[tool-budget nudge: {count}/{budget} tool requests used (>=80%). "
+            "Stop searching unless one specific missing fact is essential. Organize the "
+            "existing evidence and answer now with the required \\boxed{}.]"
+        )
+    if count >= half:
+        return (
+            f"\n\n[tool-budget nudge: {count}/{budget} tool requests used (~half). "
+            "About half the tool budget remains. Avoid repeated searches; use a different "
+            "source/query only if it can change the forecast.]"
+        )
+    return ""
+
+
+def _track_tool_request(tool_name: str, request_text: str, *, suppress_repeat: bool = True) -> Optional[str]:
+    """Return a repeat-suppression message, or None when the external call should proceed."""
+    _TOOL_STATE["count"] = int(_TOOL_STATE["count"]) + 1
+    tokens = _normalize_request(request_text)
+    if suppress_repeat:
+        for prev_tool, prev_text, prev_tokens in _TOOL_STATE["seen"]:
+            near_repeat = _same_page_scope(request_text, prev_text) and _jaccard(tokens, prev_tokens) >= 0.85
+            if prev_tool == tool_name and (request_text == prev_text or near_repeat):
+                return (
+                    f"[repeat suppressed: this {tool_name} request is the same as or very close to "
+                    "a previous one, so no external lookup was made. Use the previous tool result "
+                    "already in context. If more evidence is still needed, use a meaningfully "
+                    f"different source/query; otherwise continue from existing evidence.]{_budget_note()}"
+                )
+    _TOOL_STATE["seen"].append((tool_name, request_text, tokens))
+    return None
+
+
 
 # --------------------------------------------------------------------------------------
 # tools
@@ -358,6 +424,9 @@ async def _apply_screen(content: str) -> tuple[str, int]:
       "on/before the cutoff and any result with a later date is dropped.",
       {"query": str, "num": int, "page": int})
 async def web_search(args: dict) -> dict:
+    repeat = _track_tool_request("web_search", f"{args.get('query', '')} page={args.get('page') or 1}")
+    if repeat:
+        return {"content": [{"type": "text", "text": repeat}]}
     key = os.environ.get("SERPER_API_KEY")
     if not key:
         return {"content": [{"type": "text", "text": "[web_search error: SERPER_API_KEY not set]"}]}
@@ -407,7 +476,7 @@ async def web_search(args: dict) -> dict:
     body, screened = await _apply_screen(body)
     head = (f"[as-of {cutoff} | target {target} blocked: {dropped} post-cutoff result(s) dropped, "
             f"{redacted} snippet(s) redacted, {screened} span(s) screened]\n") if (cutoff or target) else ""
-    return {"content": [{"type": "text", "text": head + body}]}
+    return {"content": [{"type": "text", "text": head + body + _budget_note()}]}
 
 
 @tool("read_webpage",
@@ -417,6 +486,9 @@ async def web_search(args: dict) -> dict:
       "than blindly truncated. Honors the as-of cutoff: post-cutoff/target-date lines are removed.",
       {"url": str, "instruction": str})
 async def read_webpage(args: dict) -> dict:
+    repeat = _track_tool_request("read_webpage", f"{args.get('url', '')} {args.get('instruction', '')}")
+    if repeat:
+        return {"content": [{"type": "text", "text": repeat}]}
     cutoff = _cutoff()
     instruction = (args.get("instruction") or
                    "the most recent value(s), date(s), unit, and figures of the series in question")
@@ -465,7 +537,7 @@ async def read_webpage(args: dict) -> dict:
     body, screened = await _apply_screen(body)
     if banner and screened:
         banner = banner.rstrip("\n") + f" + {screened} span(s) screened by as-of model.\n\n"
-    return {"content": [{"type": "text", "text": banner + body}]}
+    return {"content": [{"type": "text", "text": banner + body + _budget_note()}]}
 
 
 @tool("exa_search",
@@ -473,6 +545,9 @@ async def read_webpage(args: dict) -> dict:
       "Restricted to documents published on/before the run's as-of cutoff.",
       {"query": str, "num": int})
 async def exa_search(args: dict) -> dict:
+    repeat = _track_tool_request("exa_search", args.get("query", ""))
+    if repeat:
+        return {"content": [{"type": "text", "text": repeat}]}
     key = os.environ.get("EXA_API_KEY")
     if not key:
         return {"content": [{"type": "text", "text": "[exa_search error: EXA_API_KEY not set]"}]}
@@ -498,7 +573,7 @@ async def exa_search(args: dict) -> dict:
     body, screened = await _apply_screen("\n".join(lines) or "[no results]")
     head = (f"[as-of {cutoff}: {dropped} post-cutoff result(s) dropped, {screened} screened]\n"
             if cutoff else "")
-    return {"content": [{"type": "text", "text": head + body}]}
+    return {"content": [{"type": "text", "text": head + body + _budget_note()}]}
 
 
 def create_server():

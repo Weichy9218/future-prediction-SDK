@@ -1,6 +1,6 @@
 """Build the prompt for one question (kit #1 = cognition in the prompt, not a state machine).
 
-render() picks the playbook by forecast_type, injects the as-of cutoff and any ON-DEMAND
+render() picks the playbook by forecast_type, injects the effective as-of cutoff and any ON-DEMAND
 experience notes, and returns (system_prompt, user_prompt). No typed frame, no coverage.
 """
 from __future__ import annotations
@@ -19,9 +19,11 @@ def _playbook_for(forecast_type: str) -> str:
     return _A if forecast_type == "number" else _B
 
 
-def render(q: Question, *, question_class: str | None = None, use_experience: bool = True) -> tuple[str, str]:
+def render(q: Question, *, effective_as_of: str | None = None,
+           question_class: str | None = None, use_experience: bool = True) -> tuple[str, str]:
+    cutoff = effective_as_of or q.as_of
     guard = (
-        f"AS-OF CUTOFF: {q.as_of}. You may only use information available up to this date. "
+        f"AS-OF CUTOFF: {cutoff}. You may only use information available up to this date. "
         f"Any source dated after it is blocked from your context; do not infer the answer from "
         f"post-cutoff knowledge."
     )

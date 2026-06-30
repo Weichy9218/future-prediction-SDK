@@ -45,12 +45,13 @@ bash agent_sdk/run.sh --model gpt-5.5 --tools \                           # one 
 ```
 `run.sh` starts the adapter on :3456, sets `HOME=cli_home`, unsets proxies (gateways are reached
 directly), then runs `run_forecast.py`. The runner loads a question from `tasks/`, picks the
-type-matched playbook (A numeric / B event), enforces the per-question as-of at the tool boundary,
-and writes `log/<group>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default group
+type-matched playbook (A numeric / B event), and enforces the effective as-of at the tool boundary:
+`min(target_date - 1 day, run_date)` unless `FUTURECAST_AS_OF` / `--as-of` explicitly overrides it.
+It writes `log/<group>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default group
 `futureworld-0629`).
 
 **Run parameters** live in `config.py` (one default each), overridable by env then CLI:
-`FUTURECAST_MODEL/REASONING_EFFORT/MAX_TOKENS/MAX_TURNS/THINKING_BUDGET/RUN_GROUP/ASOF_SCREEN/…`.
+`FUTURECAST_MODEL/REASONING_EFFORT/MAX_TOKENS/MAX_TURNS/THINKING_BUDGET/RUN_GROUP/RUN_DATE/AS_OF/ASOF_SCREEN/…`.
 The resolved set is logged as a `config:` line at run start and saved into `result.json`. Sweep by
 setting env, e.g. `FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN=off bash agent_sdk/run.sh …`.
 

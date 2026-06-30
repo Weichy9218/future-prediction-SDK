@@ -16,6 +16,7 @@ To sweep a parameter, set its env var — e.g.:
 from __future__ import annotations
 
 import os
+from datetime import date
 from dataclasses import dataclass, fields, replace
 
 # All new runs land here unless overridden (FUTURECAST_RUN_GROUP).
@@ -29,6 +30,8 @@ ENV = {
     "max_turns": "FUTURECAST_MAX_TURNS",
     "thinking_budget": "FUTURECAST_THINKING_BUDGET",
     "run_group": "FUTURECAST_RUN_GROUP",
+    "run_date": "FUTURECAST_RUN_DATE",
+    "as_of_override": "FUTURECAST_AS_OF",
     "asof_screen": "FUTURECAST_ASOF_SCREEN",
     "return_budget": "FUTURECAST_RETURN_BUDGET",
     "extract_input_cap": "FUTURECAST_EXTRACT_INPUT_CAP",
@@ -45,9 +48,11 @@ class RunConfig:
     max_tokens: int = 8192               # per-turn completion cap
 
     # --- agent loop (read by the runner process) ---
-    max_turns: int = 30                  # agent turns when --tools (knowledge-only is capped at 3)
+    max_turns: int = 50                  # agent turns when --tools (knowledge-only is capped at 3)
     thinking_budget: int = 8000          # Anthropic extended-thinking budget_tokens
     run_group: str = DEFAULT_RUN_GROUP   # output dir: log/<run_group>/<task>-<model>[-tools]/
+    run_date: str = ""                   # defaults to local YYYY-MM-DD at run start
+    as_of_override: str = ""             # explicit tool cutoff; normally blank
 
     # --- as-of guard at the tool boundary (read by the tools) ---
     asof_screen: str = "loose"           # off | loose | strict  (the dedicated screening model)
@@ -59,6 +64,10 @@ class RunConfig:
     def __post_init__(self):
         if self.asof_screen not in _ASOF_MODES:
             raise ValueError(f"asof_screen must be one of {_ASOF_MODES}, got {self.asof_screen!r}")
+        if self.run_date:
+            date.fromisoformat(self.run_date)
+        if self.as_of_override:
+            date.fromisoformat(self.as_of_override)
 
 
 def from_env(**cli_overrides) -> RunConfig:
@@ -73,6 +82,8 @@ def from_env(**cli_overrides) -> RunConfig:
         env_vals[f.name] = int(raw) if isinstance(cur, int) else raw
     cfg = replace(base, **env_vals)
     cfg = replace(cfg, **{k: v for k, v in cli_overrides.items() if v is not None})
+    if not cfg.run_date:
+        cfg = replace(cfg, run_date=date.today().isoformat())
     return cfg
 
 
@@ -85,4 +96,5 @@ def export_env(cfg: RunConfig) -> None:
 def config_summary(cfg: RunConfig) -> str:
     return (f"model={cfg.model} effort={cfg.reasoning_effort} max_tokens={cfg.max_tokens} "
             f"max_turns={cfg.max_turns} thinking={cfg.thinking_budget} run_group={cfg.run_group} "
+            f"run_date={cfg.run_date} as_of_override={cfg.as_of_override or '-'} "
             f"asof_screen={cfg.asof_screen} return_budget={cfg.return_budget}")

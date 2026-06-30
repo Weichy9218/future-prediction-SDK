@@ -90,6 +90,8 @@ bash agent_sdk/run.sh --model gpt-5.5 --tools \
 - 模型：apihy=`glm-5`/`glm-5.1`/`qwen3-235b…`/`deepseek-v4-flash`；haoxiang=`gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`。
 - 题型**自动分派**：数值题→playbook A，事件/选择/二元题→playbook B（`run_forecast.build_system_prompt`）。
 - 输出默认落 `log/futureworld-0629/`（`run_group` 默认值）。
+- 工具边界使用 `effective_as_of = min(target_date - 1 day, run_date)`；历史回测或手工复现可用
+  `FUTURECAST_AS_OF` / `--as-of` 显式覆盖。
 
 ### 参数管理（`agent_sdk/config.py`）
 所有运行参数有**唯一一处默认**（`config.py`），优先级：**默认 ← 环境变量 ← CLI 显式参数**。env 是
@@ -101,9 +103,11 @@ rollout 头部，可复现。要做 sweep 就设环境变量：
 | `model` | `FUTURECAST_MODEL`（或 `--model`） | `glm-5` | 网关模型路由 |
 | `reasoning_effort` | `FUTURECAST_REASONING_EFFORT` | `high` | low/medium/high |
 | `max_tokens` | `FUTURECAST_MAX_TOKENS` | `8192` | 单回合 completion 上限 |
-| `max_turns` | `FUTURECAST_MAX_TURNS`（或 `--max-turns`） | `14` | 带工具时的 agent 回合上限 |
-| `thinking_budget` | `FUTURECAST_THINKING_BUDGET` | `4000` | extended-thinking token 预算 |
+| `max_turns` | `FUTURECAST_MAX_TURNS`（或 `--max-turns`） | `50` | 带工具时的 agent 回合上限 |
+| `thinking_budget` | `FUTURECAST_THINKING_BUDGET` | `8000` | extended-thinking token 预算 |
 | `run_group` | `FUTURECAST_RUN_GROUP`（或 `--run-group`） | `futureworld-0629` | 输出目录 `log/<run_group>/` |
+| `run_date` | `FUTURECAST_RUN_DATE`（或 `--run-date`） | 本地今天 | 本次 forecast 的实际日期，用来 cap desired cutoff |
+| `as_of_override` | `FUTURECAST_AS_OF`（或 `--as-of`） | 空 | 显式 effective cutoff；设置后跳过 `min(target-1, run_date)` |
 | `asof_screen` | `FUTURECAST_ASOF_SCREEN`（或 `--asof-screen`） | `loose` | 工具边界 as-of 强度：`off`/`loose`/`strict` |
 | `return_budget` | `FUTURECAST_RETURN_BUDGET` | `30000` | read_webpage 整页返回上限（字符） |
 
@@ -115,12 +119,15 @@ FUTURECAST_REASONING_EFFORT=medium FUTURECAST_MAX_TURNS=8 FUTURECAST_ASOF_SCREEN
 **as-of 强度**：默认 `loose`——只删*明确*晚于 cutoff / 透露目标日的内容，保留所有 ≤cutoff/无日期数据
 （未来题无可泄漏答案，避免误删先验锚点）。历史回测改 `strict`（拿不准也删，防泄漏）；完全信任题面可 `off`（仅留确定性 regex 兜底）。
 
+工具层会做轻量 loop control：用掉约 50% 工具预算后提醒模型已经过半、避免重复检索；用掉约 80%
+后提醒尽快整理已有信息并作答。同一轮里重复/近似重复的 search/fetch 会被短路，不再访问外部 API。
+
 
 **看结果（标准化布局）：**
 ```
 log/<run_group>/<task_id>-<model_short>[-tools]/
     rollout.jsonl   # claude CLI 完整 transcript（thinking 在 content[*].type=="thinking"）
-    result.json     # {answer, reasoning_summary, final_text, tool_use_count, thinking_blocks, …}
+    result.json     # {answer, target_date, desired_as_of, effective_as_of, run_date, reasoning_summary, …}
 log/adapter.log     # 每次请求的 tools=N + [tool-surface] 工具名单 + blocks（核对工具面/路由）
 ```
 快速核对一次跑得对不对：`result.json` 的 `thinking_blocks>0`（reasoning 进轨迹）、`answer` 非空、
