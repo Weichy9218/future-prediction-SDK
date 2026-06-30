@@ -41,6 +41,7 @@ esac
 # load repo keys, drop any socks/http proxy (gateways are reached directly)
 set -a; [ -f "$ROOT/.env" ] && source "$ROOT/.env"; set +a
 unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY no_proxy || true
+"$ROOT/.venv/bin/python" "$HERE/sync_skills.py" --claude-only >/dev/null
 
 # Start our owned adapter for the chosen model; kill any prior instance on the port.
 # Run parameters live in agent_sdk/config.py (one default each), overridable by env vars — set any

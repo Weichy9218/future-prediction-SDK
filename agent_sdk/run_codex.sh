@@ -8,6 +8,7 @@ mkdir -p "$ROOT/log" "$HERE/codex/cli_home"
 
 set -a; [ -f "$ROOT/.env" ] && source "$ROOT/.env"; set +a
 unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy NO_PROXY no_proxy || true
+"$ROOT/.venv/bin/python" "$HERE/sync_skills.py" --codex-only >/dev/null
 
 if [ -z "${FUTURECAST_RUN_DATE:-}" ]; then
   export FUTURECAST_RUN_DATE="$(date +%F)"

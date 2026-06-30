@@ -50,6 +50,24 @@ type-matched playbook (A numeric / B event), and enforces the effective as-of at
 It writes `log/<group>/<backend>/<task>-<model>[-tools]/{rollout.jsonl, result.json}` (default
 group is the run-start timestamp, `YYYYMMDD-HHMMSS`).
 
+`skills/` is the tracked source for shared forecast skills. The old
+`galaxy-agent_old/skills/playbook` skills are imported as prefix-free hyphen-case names such as
+`stock-market`, `calibration`, and `national-election`; this repo additionally keeps
+`as-of-research` and `numeric-series`. `run.sh`, `run_codex.sh`, and `run_batch.sh` call
+`sync_skills.py` before launch so Claude Code sees them through the generated local plugin at
+`cli_home/.claude/plugins/forecast-skills/`, while Codex sees them under `codex/cli_home/skills/`.
+Only the source skills are committed; CLI-home copies remain generated artifacts.
+
+Removed duplicate local skills: `futurecast-core-forecasting` is covered by the imported meta
+skills plus the system prompt, and `futurecast-election-polling` is covered by `national-election`
+and `referendum`.
+
+Skill invocation is handled by the rented agent runtimes, not by forecast Python code. Claude Code
+receives the plugin path and explicit skill names via `ClaudeAgentOptions.plugins/skills`, then can
+call the `Skill` tool when a skill description matches the question. Codex discovers the same
+folders from `CODEX_HOME/skills` and loads matching skill instructions through its native skill
+mechanism.
+
 **Run parameters** live in `config.py` (one default each), overridable by env then CLI:
 `FUTURECAST_MODEL/REASONING_EFFORT/MAX_TOKENS/MAX_TURNS/THINKING_BUDGET/RUN_GROUP/RUN_DATE/AS_OF/ASOF_SCREEN/…`.
 The resolved set is logged as a `config:` line at run start and saved into `result.json`. Sweep by

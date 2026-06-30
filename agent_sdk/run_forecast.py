@@ -51,10 +51,14 @@ from config import from_env, export_env  # noqa: E402  sibling: typed run parame
 from common import (  # noqa: E402
     DEFAULT_QFILE, config_summary, extract_boxed, load_question_and_prompt, run_output_dir,
 )
+from sync_skills import CLAUDE_PLUGIN_DIR, skill_names, sync_claude  # noqa: E402
 
 
 async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
     export_env(cfg)   # make the resolved config the source of truth for in-process tools + the adapter
+    enabled_skills = skill_names()
+    if enabled_skills and not CLAUDE_PLUGIN_DIR.exists():
+        sync_claude()
     q, desired_as_of, effective_as_of, system_prompt = load_question_and_prompt(qfile, task_index, cfg)
     os.environ["FUTURECAST_AS_OF"] = effective_as_of   # the as-of guard (tools_mcp) reads this
     os.environ["FUTURECAST_TARGET"] = q.target_date or ""  # the date whose value must NOT leak
@@ -89,6 +93,8 @@ async def main(cfg, use_tools: bool, qfile: str, task_index: int) -> None:
         max_turns=cfg.max_turns if use_tools else 3,
         cwd=str(CWD),
         env=env,
+        plugins=[{"type": "local", "path": str(CLAUDE_PLUGIN_DIR)}],
+        skills=enabled_skills,
         setting_sources=[],
     )
 

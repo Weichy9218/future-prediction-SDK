@@ -57,6 +57,10 @@
   （`Read/Glob/Grep/Edit/Write/Bash/Agent/Task/Skill` + 3 个 MCP），剔除宿主 harness 杂项。
 - **prompt** = `futurecast/playbook/`（A 数值 / B 事件）+ runner 按题型组装的 system prompt + as-of
   vantage 重构。**预测认知只在这里。**
+- **skills** = `agent_sdk/skills/`：Claude Code 和 Codex 共用的 lightweight forecast skills。旧
+  `galaxy-agent_old/skills/playbook` 已导入为无前缀 hyphen-case skill（如 `stock-market`、
+  `calibration`、`national-election`）；另外保留本仓库特有的 `as-of-research` 和 `numeric-series`。
+  运行入口会自动同步到各自 CLI home；source skill 纳入 git，运行态 CLI home 仍 gitignored。
 - **hook** = `futurecast/guard/as_of.py` 在 Claude/Futurecast MCP **工具边界**的拦截（我们对租来 loop 的唯一"插桩"）：
   ① 确定性 regex（检索日期上限 + 目标日/cutoff 后脱敏）；② **专职筛选模型**（qwen3-next-80b）逐字
   指认残余泄漏 span，由我们确定性删除。Claude backend 的 main agent **永远看不到 cutoff 之后的信息**；
@@ -93,6 +97,15 @@ bash agent_sdk/run.sh --backend codex --model gpt-5.5 --tools \
 ```
 - `--backend claude_code` 启动 adapter(:3456)、设 `HOME=agent_sdk/cli_home`（claude CLI 写 transcript 处）、unset 代理。
 - `--backend codex` 调用 `codex exec --json`，使用同一个 gpt-5.5/Sub2API gateway；`--tools` 使用 Codex 原生 web search。
+- 两个 backend 启动前都会从 `agent_sdk/skills/` 同步全部 forecast skills 到各自 CLI home：
+  Claude Code -> 本地 plugin `agent_sdk/cli_home/.claude/plugins/forecast-skills/skills/`，
+  Codex -> `agent_sdk/codex/cli_home/skills/`。
+- skills 的调用不是业务代码手动分派：Claude Code 通过 `ClaudeAgentOptions.plugins/skills` 暴露 plugin，
+  模型可用 `Skill` 工具按 `description` 触发；Codex 通过 `CODEX_HOME/skills` 自动发现，同样按 metadata
+  在 agent loop 内选择加载。
+- 重复项已删除：旧 `futurecast-core-forecasting` 被 `base-rate-estimation`、`calibration`、
+  `web-search-strategy` 和现有 system prompt 覆盖；旧 `futurecast-election-polling` 被
+  `national-election` / `referendum` 覆盖。
 - 模型：apihy=`glm-5`/`glm-5.1`/`qwen3-235b…`/`deepseek-v4-flash`；haoxiang=`gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`。
 - 题型**自动分派**：数值题→playbook A，事件/选择/二元题→playbook B（`run_forecast.build_system_prompt`）。
 - 输出默认落 `log/YYYYMMDD-HHMMSS/`（`run_group` 默认为运行开始 timestamp）。
@@ -179,7 +192,9 @@ Futurecast MCP 也接进 Codex，而不是使用 Codex 原生 search。
 
 ```
 agent_sdk/                # 自有运行底座（租来的 agent 在这里跑）—— 见 agent_sdk/README.md
-  llm_adapter.py  tools_mcp.py  run_forecast.py  run.sh  config.py  cli_home/[gitignore]
+  llm_adapter.py  tools_mcp.py  run_forecast.py  run.sh  config.py  sync_skills.py
+  skills/        # Claude Code/Codex 共用 forecast skills 源目录；CLI home 内副本 gitignored
+  cli_home/[gitignore]
 futurecast/               # 预测控制层（只控制 agent 之外）
   playbook/   # 件#prompt：A 数值 / B 事件（先验+校准），无 Python 状态机
   guard/      # 件#hook：as_of 工具边界拦截（regex + 专职筛选模型）
